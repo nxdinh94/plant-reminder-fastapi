@@ -27,7 +27,6 @@ if settings.cors_origins:
         allow_headers=["*"],
     )
 
-
 @app.middleware("http")
 async def request_context_middleware(request: Request, call_next):
     request_id_header = request.headers.get("X-Request-ID")

@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class PlantCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    species: str = Field(min_length=1, max_length=120)
+    species: str = Field(max_length=120, default="")
     potted_date: date | None = None
     image_path: str | None = Field(default=None, max_length=1024)
     note: str | None = None
@@ -14,7 +14,7 @@ class PlantCreate(BaseModel):
 
 class PlantUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
-    species: str | None = Field(default=None, min_length=1, max_length=120)
+    species: str | None = Field(default=None, max_length=120)
     potted_date: date | None = None
     image_path: str | None = Field(default=None, max_length=1024)
     note: str | None = None

@@ -102,7 +102,6 @@ def delete_plant(
     ).scalar_one_or_none()
     if plant is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plant not found")
-    soft_delete(plant)
-    db.add(plant)
+    db.delete(plant)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

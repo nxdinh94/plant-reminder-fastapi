@@ -128,8 +128,7 @@ def _apply_profile_settings_mutation(
 
     if operation == "delete":
         if entity is not None:
-            soft_delete(entity)
-            db.add(entity)
+            db.delete(entity)
         return current_user.id
 
     data = ProfileSettingsUpdate.model_validate(payload).model_dump(exclude_unset=True)
@@ -200,8 +199,7 @@ def _apply_generic_mutation(
         return entity.id
 
     if item.operation == "delete":
-        soft_delete(entity)
-        db.add(entity)
+        db.delete(entity)
         db.flush()
         return entity.id
 

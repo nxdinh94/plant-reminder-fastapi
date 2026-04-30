@@ -96,6 +96,7 @@ In full compose mode, API uses container-to-container DB URL (`db:5432`) automat
   - `POST /api/v1/sync/push`
   - `GET /api/v1/sync/pull?since=...`
 - Feature APIs:
+  - `POST /api/v1/agent/chat`
   - `GET/POST/PATCH/DELETE /api/v1/plants`
   - `GET/POST/PATCH/DELETE /api/v1/action-types`
   - `GET/POST/PATCH/DELETE /api/v1/schedules`
@@ -104,3 +105,17 @@ In full compose mode, API uses container-to-container DB URL (`db:5432`) automat
   - `GET/POST/PATCH/DELETE /api/v1/notes`
   - `GET/POST/PATCH/DELETE /api/v1/timelines`
   - `GET/PUT /api/v1/profile/settings`
+
+## Agent Configuration (OpenRouter + LangGraph)
+
+Set these in `.env` to enable model-backed agent chat:
+
+```env
+OPENROUTER_API_KEY=your_key_here
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=google/gemini-3.1-flash-lite
+OPENROUTER_SITE_URL=https://your-app-url.example
+OPENROUTER_SITE_NAME=Plant Reminder API
+```
+
+When `OPENROUTER_API_KEY` is not provided, the agent falls back to local small-talk handling only.

@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     )
     bcrypt_rounds: int = Field(default=12, alias="BCRYPT_ROUNDS")
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list, alias="CORS_ORIGINS")
+    openrouter_api_key: str | None = Field(default=None, alias="OPENROUTER_API_KEY")
+    openrouter_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        alias="OPENROUTER_BASE_URL",
+    )
+    openrouter_model: str = Field(
+        default="google/gemini-3.1-flash-lite",
+        alias="OPENROUTER_MODEL",
+    )
+    openrouter_site_url: str | None = Field(default=None, alias="OPENROUTER_SITE_URL")
+    openrouter_site_name: str | None = Field(default=None, alias="OPENROUTER_SITE_NAME")
 
     @field_validator("cors_origins", mode="before")
     @classmethod

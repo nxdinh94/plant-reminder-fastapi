@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from collections.abc import AsyncIterator
+from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-from langgraph.graph import END, START, MessagesState, StateGraph
-from langgraph.prebuilt import ToolNode
+try:
+    from langchain.chat_models import init_chat_model
+    from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    _LANGCHAIN_AVAILABLE = True
+except ModuleNotFoundError:
+    _LANGCHAIN_AVAILABLE = False
 
 from app.agent_tools.small_talk import generate_small_talk_response, small_talk_tool
 from app.core.config import settings
@@ -35,12 +43,14 @@ Reference document context:
 
 class LangGraphChatAgent:
     def __init__(self) -> None:
-        self._llm_enabled = bool(settings.openrouter_api_key)
+        self._llm_enabled = bool(settings.openrouter_api_key) and _LANGCHAIN_AVAILABLE
+        self._llm: Any | None = None
         self._graph = self._build_graph() if self._llm_enabled else None
 
-    def _build_graph(self):
-        llm = ChatOpenAI(
-            model=settings.openrouter_model,
+    def _build_graph(self) -> Any:
+        self._llm = init_chat_model(
+            settings.openrouter_model,
+            model_provider="openai",
             api_key=settings.openrouter_api_key,
             base_url=settings.openrouter_base_url,
             default_headers={
@@ -53,7 +63,7 @@ class LangGraphChatAgent:
         tool_node = ToolNode([small_talk_tool])
 
         def assistant_node(state: MessagesState) -> dict[str, list[BaseMessage]]:
-            model_response = llm.invoke(state["messages"])
+            model_response = self._llm.invoke(state["messages"])
             return {"messages": [model_response]}
 
         def route_after_assistant(state: MessagesState) -> str:
@@ -85,6 +95,28 @@ class LangGraphChatAgent:
         reply = self._extract_final_reply(response_messages)
         tool_calls = self._extract_tool_calls(response_messages)
         return AgentChatResponse(reply=reply, tool_calls=tool_calls)
+
+    async def chat_stream(self, message: str) -> AsyncIterator[str]:
+        if not self._llm_enabled or self._llm is None:
+            fallback_reply = generate_small_talk_response(message)
+            yield self._sse("chunk", fallback_reply)
+            yield self._sse("done", json.dumps({"reply": fallback_reply}))
+            return
+
+        full_reply = ""
+        async for chunk in self._llm.astream(
+            [
+                SystemMessage(content=SYSTEM_PROMPT),
+                HumanMessage(content=message),
+            ]
+        ):
+            content = self._chunk_text(chunk.content)
+            if not content:
+                continue
+            full_reply += content
+            yield self._sse("chunk", content)
+
+        yield self._sse("done", json.dumps({"reply": full_reply.strip()}))
 
     def _invoke_graph(self, message: str) -> Sequence[BaseMessage]:
         if self._graph is None:
@@ -119,6 +151,27 @@ class LangGraphChatAgent:
                     seen.add(name)
                     tool_calls.append(AgentToolCall(name=name))
         return tool_calls
+
+    @staticmethod
+    def _chunk_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                    continue
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text = item.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "".join(parts)
+        return ""
+
+    @staticmethod
+    def _sse(event: str, data: str) -> str:
+        return f"event: {event}\ndata: {data}\n\n"
 
 
 agent = LangGraphChatAgent()

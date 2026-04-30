@@ -40,7 +40,7 @@ class Settings(BaseSettings):
         alias="OPENROUTER_BASE_URL",
     )
     openrouter_model: str = Field(
-        default="google/gemini-3.1-flash-lite",
+        default="google/gemini-3.1-flash-lite-preview",
         alias="OPENROUTER_MODEL",
     )
     openrouter_site_url: str | None = Field(default=None, alias="OPENROUTER_SITE_URL")

@@ -15,6 +15,7 @@ try:
 except ModuleNotFoundError:
     _LANGCHAIN_AVAILABLE = False
 
+from app.agent_tools.datetime_tool import datetime_tool, generate_datetime_response, is_datetime_request
 from app.agent_tools.small_talk import generate_small_talk_response, small_talk_tool
 from app.core.config import settings
 from app.schemas.chat import AgentChatResponse, AgentToolCall
@@ -34,7 +35,8 @@ You are a simple Plant Reminder assistant.
 Current capability target: friendly small talk first.
 Keep answers concise and clear.
 Use small_talk_tool when a message is greeting/chitchat/thanks/bye/how-are-you.
-If the user asks beyond current capability, clearly say you currently support small talk only.
+Use datetime_tool for date/time/timezone questions.
+If the user asks beyond current capability, clearly say you currently support small talk and datetime only.
 
 Reference document context:
 {OPENROUTER_QUICKSTART_CONTEXT}
@@ -58,9 +60,9 @@ class LangGraphChatAgent:
                 "X-OpenRouter-Title": settings.openrouter_site_name or "",
             },
             temperature=0.2,
-        ).bind_tools([small_talk_tool])
+        ).bind_tools([small_talk_tool, datetime_tool])
 
-        tool_node = ToolNode([small_talk_tool])
+        tool_node = ToolNode([small_talk_tool, datetime_tool])
 
         def assistant_node(state: MessagesState) -> dict[str, list[BaseMessage]]:
             model_response = self._llm.invoke(state["messages"])
@@ -86,6 +88,11 @@ class LangGraphChatAgent:
 
     def chat(self, message: str) -> AgentChatResponse:
         if not self._llm_enabled:
+            if is_datetime_request(message):
+                return AgentChatResponse(
+                    reply=generate_datetime_response(),
+                    tool_calls=[AgentToolCall(name="datetime_tool")],
+                )
             return AgentChatResponse(
                 reply=generate_small_talk_response(message),
                 tool_calls=[AgentToolCall(name="small_talk_tool")],
@@ -136,7 +143,7 @@ class LangGraphChatAgent:
         for msg in reversed(messages):
             if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.strip():
                 return msg.content.strip()
-        return "I can handle small talk for now."
+        return "I can handle small talk and datetime questions for now."
 
     @staticmethod
     def _extract_tool_calls(messages: Sequence[BaseMessage]) -> list[AgentToolCall]:

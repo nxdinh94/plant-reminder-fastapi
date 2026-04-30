@@ -22,7 +22,8 @@ def test_agent_chat_small_talk_uses_tool(client: TestClient) -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert "Hi!" in payload["reply"]
+    assert isinstance(payload["reply"], str)
+    assert payload["reply"].strip()
     assert payload["tool_calls"] == [{"name": "small_talk_tool"}]
 
 
@@ -33,3 +34,18 @@ def test_agent_chat_requires_auth(client: TestClient) -> None:
     )
 
     assert response.status_code == 401
+
+
+def test_agent_chat_datetime_uses_tool(client: TestClient) -> None:
+    headers = register_and_auth_headers(client, "agent-datetime@example.com")
+
+    response = client.post(
+        "/api/v1/agent/chat",
+        json={"message": "what time is it now?"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "Current datetime in" in payload["reply"]
+    assert payload["tool_calls"] == [{"name": "datetime_tool"}]

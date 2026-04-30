@@ -5,6 +5,9 @@ import json
 import uuid
 import re
 import logging
+from urllib import request as urllib_request
+from urllib.error import HTTPError, URLError
+from typing import cast
 from collections.abc import Sequence
 from collections.abc import AsyncIterator
 from typing import Any
@@ -59,13 +62,13 @@ logger = logging.getLogger(__name__)
 class LangGraphChatAgent:
     def __init__(self) -> None:
         self._llm_enabled = bool(settings.openrouter_api_key) and _LANGCHAIN_AVAILABLE
-        self._vision_enabled = bool(settings.openrouter_api_key) and _LANGCHAIN_AVAILABLE
+        self._vision_enabled = bool(settings.openrouter_api_key)
         self._llm: Any | None = None
         self._vision_llm: Any | None = None
         self._graph = self._build_graph() if self._llm_enabled else None
         self._proposal_store: dict[str, PlantDetectionData] = {}
         self._proposal_lock = Lock()
-        if self._vision_enabled:
+        if self._vision_enabled and _LANGCHAIN_AVAILABLE:
             self._vision_llm = init_chat_model(
                 settings.openrouter_model,
                 model_provider="openai",
@@ -282,11 +285,10 @@ class LangGraphChatAgent:
         return f"event: {event}\ndata: {data}\n\n"
 
     def _detect_plant(self, image_base64: str) -> PlantDetectionData | None:
-        if not self._vision_enabled or self._vision_llm is None:
+        if not self._vision_enabled:
             logger.warning(
-                "Plant image analyze skipped: vision disabled (has_api_key=%s, langchain_available=%s)",
+                "Plant image analyze skipped: vision disabled (has_api_key=%s)",
                 bool(settings.openrouter_api_key),
-                _LANGCHAIN_AVAILABLE,
             )
             return None
 
@@ -296,45 +298,60 @@ class LangGraphChatAgent:
             return None
 
         prompt = (
-            "Analyze this image. If it is a plant, return JSON object with keys: "
-            "plant_name, species, short_care_guide. "
-            "If it is not a plant or uncertain, return JSON object: {\"not_detected\": true}. "
+            "First, describe the visible things in this image in one short sentence. "
+            "Then decide whether a plant is clearly present. "
+            "Return strict JSON only. "
+            "If a plant is clearly present, return: "
+            "{\"plant_name\":\"...\",\"species\":\"...\",\"short_care_guide\":\"...\",\"description\":\"...\"}. "
+            "If no plant is present or uncertain, return: "
+            "{\"not_detected\": true, \"description\":\"...\"}. "
             "Do not include markdown."
         )
-        try:
-            response = self._vision_llm.invoke(
-                [
-                    SystemMessage(content="You are a plant image analysis assistant."),
-                    HumanMessage(
-                        content=[
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": data_url}},
-                        ]
-                    ),
-                ]
-            )
-        except Exception:
-            logger.exception("Plant image analyze failed: model invocation error")
-            return None
-        raw = self._chunk_text(response.content).strip()
+        raw = ""
+        if self._vision_llm is not None:
+            try:
+                response = self._vision_llm.invoke(
+                    [
+                        SystemMessage(content="You are a plant image analysis assistant."),
+                        HumanMessage(
+                            content=[
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                            ]
+                        ),
+                    ]
+                )
+                raw = self._chunk_text(response.content).strip()
+            except Exception:
+                logger.exception("Plant image analyze failed: langchain model invocation error")
+                return None
+        else:
+            raw = self._invoke_vision_openrouter_rest(prompt, data_url)
         if not raw:
             logger.warning("Plant image analyze failed: empty model response")
             return None
-        raw = self._extract_json_object(raw)
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            logger.warning("Plant image analyze failed: non-JSON model response snippet=%r", raw[:300])
+        payload = self._parse_vision_payload(raw)
+        if payload is None:
+            logger.warning("Plant image analyze non-JSON response; trying text fallback snippet=%r", raw[:300])
+            fallback = self._detect_plant_from_text(raw)
+            if fallback is not None:
+                return fallback
             return None
 
         if payload.get("not_detected") is True:
             logger.info("Plant image analyze result: model returned not_detected")
             return None
         try:
+            plant_name = str(payload.get("plant_name") or payload.get("name") or "").strip()
+            species = str(payload.get("species") or payload.get("scientific_name") or "").strip()
+            short_care_guide = str(payload.get("short_care_guide") or payload.get("care_guide") or "").strip()
+            if not plant_name or not species or not short_care_guide:
+                logger.warning("Plant image analyze failed: JSON missing expected keys payload=%r", payload)
+                return None
             return PlantDetectionData(
-                plant_name=str(payload["plant_name"]).strip(),
-                species=str(payload["species"]).strip(),
-                short_care_guide=str(payload["short_care_guide"]).strip(),
+                plant_name=plant_name,
+                species=species,
+                short_care_guide=short_care_guide,
             )
         except Exception:
             logger.warning("Plant image analyze failed: JSON missing expected keys payload=%r", payload)
@@ -387,6 +404,120 @@ class LangGraphChatAgent:
         if start != -1 and end != -1 and end > start:
             return raw[start : end + 1]
         return raw
+
+    @staticmethod
+    def _parse_vision_payload(raw: str) -> dict[str, Any] | None:
+        candidates: list[str] = []
+
+        # 1) raw as-is
+        candidates.append(raw)
+
+        # 2) fenced JSON blocks
+        for block in re.findall(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", raw, flags=re.IGNORECASE):
+            candidates.append(block)
+
+        # 3) broad slice from first "{" to last "}"
+        candidates.append(LangGraphChatAgent._extract_json_object(raw))
+
+        for candidate in candidates:
+            text = candidate.strip()
+            if not text:
+                continue
+            try:
+                payload = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                return cast(dict[str, Any], payload)
+        return None
+
+    @staticmethod
+    def _detect_plant_from_text(raw: str) -> PlantDetectionData | None:
+        text = raw.lower()
+        plant_keywords = [
+            "plant",
+            "leaf",
+            "leaves",
+            "flower",
+            "tree",
+            "succulent",
+            "herb",
+            "grass",
+            "fern",
+            "cactus",
+            "pot",
+            "foliage",
+        ]
+        if not any(k in text for k in plant_keywords):
+            return None
+
+        # Best-effort fallback when model does not follow JSON contract.
+        return PlantDetectionData(
+            plant_name="Unknown plant (from image description)",
+            species="Unknown",
+            short_care_guide=(
+                "Place in bright indirect light, water when topsoil is dry, "
+                "and avoid overwatering until species is confirmed."
+            ),
+        )
+
+    def _invoke_vision_openrouter_rest(self, prompt: str, data_url: str) -> str:
+        payload = {
+            "model": settings.openrouter_model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a plant image analysis assistant.",
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ],
+            "temperature": 0.1,
+        }
+        headers = {
+            "Authorization": f"Bearer {settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+        }
+        if settings.openrouter_site_url:
+            headers["HTTP-Referer"] = settings.openrouter_site_url
+        if settings.openrouter_site_name:
+            headers["X-OpenRouter-Title"] = settings.openrouter_site_name
+
+        req = urllib_request.Request(
+            url=f"{settings.openrouter_base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib_request.urlopen(req, timeout=60) as resp:
+                body = resp.read().decode("utf-8")
+        except HTTPError:
+            logger.exception("Plant image analyze failed: openrouter HTTP error")
+            return ""
+        except URLError:
+            logger.exception("Plant image analyze failed: openrouter URL error")
+            return ""
+        except Exception:
+            logger.exception("Plant image analyze failed: openrouter request error")
+            return ""
+
+        try:
+            parsed = json.loads(body)
+            return (
+                parsed.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+                .strip()
+            )
+        except Exception:
+            logger.warning("Plant image analyze failed: invalid OpenRouter response snippet=%r", body[:300])
+            return ""
 
 
 agent = LangGraphChatAgent()

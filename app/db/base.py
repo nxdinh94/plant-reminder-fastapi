@@ -1,5 +1,6 @@
 from app.models.base import Base
 from app.models.action_type import ActionType
+from app.models.chat_plant_proposal import ChatPlantProposal
 from app.models.note import Note
 from app.models.plant import Plant
 from app.models.profile_setting import ProfileSetting
@@ -12,6 +13,7 @@ from app.models.user import User
 __all__ = [
     "ActionType",
     "Base",
+    "ChatPlantProposal",
     "Note",
     "Plant",
     "ProfileSetting",

@@ -22,6 +22,30 @@ def test_normalize_rejects_invalid_payload() -> None:
 
 
 def test_extract_json_object_from_markdown_wrapped_reply() -> None:
-    wrapped = '```json\n{"plant_name":"Rose","species":"Rosa","short_care_guide":"Sun"}\n```'
+    wrapped = '```json\n{"plant_name":"Rose","species":"Rosa","note":"Sun"}\n```'
     extracted = LangGraphChatAgent._extract_json_object(wrapped)
-    assert extracted == '{"plant_name":"Rose","species":"Rosa","short_care_guide":"Sun"}'
+    assert extracted == '{"plant_name":"Rose","species":"Rosa","note":"Sun"}'
+
+
+def test_parse_not_detected_truthy_string_marker() -> None:
+    payload = LangGraphChatAgent._parse_vision_payload('{"not_detected":"true"}')
+    assert payload is not None
+    assert LangGraphChatAgent._is_not_detected_payload(payload) is True
+
+
+def test_extract_text_field_supports_fallback_keys() -> None:
+    payload = {"common_name": "Snake Plant", "botanical_name": "Dracaena trifasciata"}
+    assert LangGraphChatAgent._extract_text_field(payload, "plant_name", "common_name") == "Snake Plant"
+    assert LangGraphChatAgent._extract_text_field(payload, "species", "botanical_name") == "Dracaena trifasciata"
+
+
+def test_detect_plant_sets_provider_error_on_empty_model_response() -> None:
+    agent = LangGraphChatAgent()
+    agent._vision_enabled = True
+    agent._vision_llm = None
+    agent._invoke_vision_openrouter_rest = lambda _prompt, _data_url: ""
+
+    detected = agent._detect_plant("dGVzdA==dGVzdA==dGVzdA==dGVzdA==")
+
+    assert detected is None
+    assert agent._last_plant_image_failure_reason == "provider_error"

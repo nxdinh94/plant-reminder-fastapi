@@ -12,7 +12,7 @@ def test_plant_image_detect_then_accept(client: TestClient) -> None:
     agent._detect_plant = lambda _img: PlantDetectionData(
         plant_name="Peace Lily",
         species="Spathiphyllum wallisii",
-        short_care_guide="Keep in indirect light and water when top soil is dry.",
+        note="Keep in indirect light and water when top soil is dry.",
     )
     try:
         analyze = client.post(
@@ -35,6 +35,11 @@ def test_plant_image_detect_then_accept(client: TestClient) -> None:
         decision_payload = decision.json()
         assert decision_payload["status"] == "accepted"
         assert decision_payload["data"]["plant_name"] == "Peace Lily"
+        assert decision_payload["plant_url"]
+
+        plants = client.get("/api/v1/plants", headers=headers)
+        assert plants.status_code == 200
+        assert any(item["name"] == "Peace Lily" for item in plants.json())
     finally:
         agent._detect_plant = original
 
@@ -46,7 +51,7 @@ def test_plant_image_detect_then_edit(client: TestClient) -> None:
     agent._detect_plant = lambda _img: PlantDetectionData(
         plant_name="Snake Plant",
         species="Dracaena trifasciata",
-        short_care_guide="Water lightly every 2-3 weeks.",
+        note="Water lightly every 2-3 weeks.",
     )
     try:
         analyze = client.post(
@@ -64,7 +69,7 @@ def test_plant_image_detect_then_edit(client: TestClient) -> None:
                 "edited_data": {
                     "plant_name": "Sansevieria",
                     "species": "Dracaena trifasciata",
-                    "short_care_guide": "Bright indirect light, sparse watering.",
+                    "note": "Bright indirect light, sparse watering.",
                 },
             },
             headers=headers,
@@ -93,5 +98,40 @@ def test_plant_image_not_detected_returns_natural_message(client: TestClient) ->
         assert payload["status"] == "not_detected"
         assert "couldn't clearly detect a plant" in payload["reply"]
         assert payload["decision_required"] is False
+    finally:
+        agent._detect_plant = original
+
+
+def test_plant_image_second_analyze_blocked_until_decision(client: TestClient) -> None:
+    headers = register_and_auth_headers(client, "plant-blocked@example.com")
+
+    original = agent._detect_plant
+    agent._detect_plant = lambda _img: PlantDetectionData(
+        plant_name="Pothos",
+        species="Epipremnum aureum",
+        note="Allow top 1-2 inches of soil to dry before watering.",
+    )
+    try:
+        first = client.post(
+            "/api/v1/agent/plant-image/analyze",
+            json={"image_base64": "dGVzdA==dGVzdA==dGVzdA==dGVzdA=="},
+            headers=headers,
+        )
+        assert first.status_code == 200
+        first_payload = first.json()
+        assert first_payload["status"] == "detected"
+        assert first_payload["decision_required"] is True
+
+        second = client.post(
+            "/api/v1/agent/plant-image/analyze",
+            json={"image_base64": "dGVzdA==dGVzdA==dGVzdA==dGVzdA=="},
+            headers=headers,
+        )
+        assert second.status_code == 200
+        second_payload = second.json()
+        assert second_payload["status"] == "detected"
+        assert second_payload["decision_required"] is True
+        assert second_payload["proposal_id"] == first_payload["proposal_id"]
+        assert "decision is still pending" in second_payload["reply"].lower()
     finally:
         agent._detect_plant = original

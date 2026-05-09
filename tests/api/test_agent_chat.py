@@ -1,4 +1,8 @@
+import json
+
 from fastapi.testclient import TestClient
+from app.schemas.chat import PlantDetectionData
+from app.services.agent_chat import agent
 
 
 def register_and_auth_headers(client: TestClient, email: str) -> dict[str, str]:
@@ -49,3 +53,31 @@ def test_agent_chat_datetime_uses_tool(client: TestClient) -> None:
     payload = response.json()
     assert "Current datetime in" in payload["reply"]
     assert payload["tool_calls"] == [{"name": "datetime_tool"}]
+
+
+def test_agent_chat_with_image_uses_plant_detect_tool_and_returns_json(client: TestClient) -> None:
+    headers = register_and_auth_headers(client, "agent-image@example.com")
+
+    original = agent._detect_plant
+    agent._detect_plant = lambda _img: PlantDetectionData(
+        plant_name="Pothos",
+        species="Epipremnum aureum",
+        note="Bright indirect light; water when top soil dries.",
+    )
+    try:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "analyze this image",
+                "image_base64": "dGVzdA==dGVzdA==dGVzdA==dGVzdA==",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["tool_calls"] == [{"name": "plant_image_detect_tool"}]
+        parsed = json.loads(payload["reply"])
+        assert parsed["is_plant"] is True
+        assert parsed["data"]["plant_name"] == "Pothos"
+    finally:
+        agent._detect_plant = original

@@ -8,22 +8,13 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.endpoints.common import bump_version, soft_delete
 from app.core.config import settings
+from app.core.path_policy import normalize_image_path
 from app.db.session import get_db
 from app.dependencies.auth import get_current_user
-from app.models.action_type import ActionType
-from app.models.note import Note
-from app.models.plant import Plant
-from app.models.profile_setting import ProfileSetting
-from app.models.schedule import Schedule
-from app.models.sync_operation import SyncOperation
-from app.models.task_completion import TaskCompletion
-from app.models.timeline import Timeline
 from app.models.user import User
-from app.schemas.action_type import ActionTypeCreate, ActionTypeUpdate
-from app.schemas.note import NoteCreate, NoteUpdate
-from app.schemas.plant import PlantCreate, PlantUpdate
-from app.schemas.profile import ProfileSettingsUpdate
-from app.schemas.schedule import ScheduleCreate, ScheduleUpdate
+from app.models.profile_setting import ProfileSetting
+from app.models.sync_operation import SyncOperation
+from app.models import Plant, Note, Schedule, TaskCompletion, Timeline, ActionType
 from app.schemas.sync import (
     SyncBootstrapResponse,
     SyncCapabilitiesResponse,
@@ -35,53 +26,55 @@ from app.schemas.sync import (
     SyncPushRequest,
     SyncPushResponse,
 )
+from app.schemas.profile import ProfileSettingsUpdate
+from app.schemas.plant import PlantCreate, PlantUpdate
+from app.schemas.note import NoteCreate, NoteUpdate
+from app.schemas.schedule import ScheduleCreate, ScheduleUpdate
 from app.schemas.task_completion import TaskCompletionCreate, TaskCompletionUpdate
 from app.schemas.timeline import TimelineCreate, TimelineUpdate
+from app.schemas.action_type import ActionTypeCreate, ActionTypeUpdate
 
-
-router = APIRouter(prefix="/sync", tags=["sync"])
-
-SYNC_ENTITIES = [
-    SyncEntityCapability(name="plants"),
-    SyncEntityCapability(name="action_types"),
-    SyncEntityCapability(name="schedules"),
-    SyncEntityCapability(name="task_completions"),
-    SyncEntityCapability(name="notes"),
-    SyncEntityCapability(name="timelines"),
-    SyncEntityCapability(name="profile_settings"),
-]
-
-SYNC_IDEMPOTENCY = SyncIdempotencyCapability()
+router = APIRouter()
 
 MODEL_MAP = {
-    "plants": Plant,
-    "action_types": ActionType,
-    "schedules": Schedule,
-    "task_completions": TaskCompletion,
-    "notes": Note,
-    "timelines": Timeline,
-    "profile_settings": ProfileSetting,
+    "plant": Plant,
+    "note": Note,
+    "schedule": Schedule,
+    "task_completion": TaskCompletion,
+    "timeline": Timeline,
+    "action_type": ActionType,
+    "profile_setting": ProfileSetting,
 }
 
 CREATE_SCHEMA_MAP = {
-    "plants": PlantCreate,
-    "action_types": ActionTypeCreate,
-    "schedules": ScheduleCreate,
-    "task_completions": TaskCompletionCreate,
-    "notes": NoteCreate,
-    "timelines": TimelineCreate,
-    "profile_settings": ProfileSettingsUpdate,
+    "plant": PlantCreate,
+    "note": NoteCreate,
+    "schedule": ScheduleCreate,
+    "task_completion": TaskCompletionCreate,
+    "timeline": TimelineCreate,
+    "action_type": ActionTypeCreate,
 }
 
 UPDATE_SCHEMA_MAP = {
-    "plants": PlantUpdate,
-    "action_types": ActionTypeUpdate,
-    "schedules": ScheduleUpdate,
-    "task_completions": TaskCompletionUpdate,
-    "notes": NoteUpdate,
-    "timelines": TimelineUpdate,
-    "profile_settings": ProfileSettingsUpdate,
+    "plant": PlantUpdate,
+    "note": NoteUpdate,
+    "schedule": ScheduleUpdate,
+    "task_completion": TaskCompletionUpdate,
+    "timeline": TimelineUpdate,
+    "action_type": ActionTypeUpdate,
 }
+
+SYNC_ENTITIES = [
+    SyncEntityCapability(name="plant"),
+    SyncEntityCapability(name="note"),
+    SyncEntityCapability(name="schedule"),
+    SyncEntityCapability(name="task_completion"),
+    SyncEntityCapability(name="timeline"),
+    SyncEntityCapability(name="action_type"),
+    SyncEntityCapability(name="profile_setting"),
+]
+
+SYNC_IDEMPOTENCY = SyncIdempotencyCapability()
 
 
 def _serialize_value(value: Any) -> Any:
@@ -90,8 +83,27 @@ def _serialize_value(value: Any) -> Any:
     return value
 
 
+def _path_to_url(image_path: str | None) -> str | None:
+    if not image_path:
+        return None
+    if image_path.startswith("http"):
+        return image_path
+    normalized = image_path.replace("\\", "/")
+    upload_dir_str = str(settings.upload_dir_path).replace("\\", "/")
+    if normalized.startswith(upload_dir_str):
+        relative = normalized[len(upload_dir_str):].lstrip("/")
+        return f"/uploads/{relative}"
+    if "/uploads/" in normalized:
+        idx = normalized.index("/uploads/")
+        return normalized[idx:]
+    return f"/uploads/{normalized.rsplit('/', 1)[-1]}"
+
+
 def _serialize_entity(entity: Any) -> dict[str, Any]:
-    return {column.name: _serialize_value(getattr(entity, column.name)) for column in entity.__table__.columns}
+    result = {column.name: _serialize_value(getattr(entity, column.name)) for column in entity.__table__.columns}
+    if hasattr(entity, "image_path") and result.get("image_path"):
+        result["image_path"] = _path_to_url(result["image_path"])
+    return result
 
 
 def _get_entity_by_id(db: Session, model: Any, user_id: str, entity_id: str | None) -> Any | None:

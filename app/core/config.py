@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
@@ -40,8 +41,20 @@ class Settings(BaseSettings):
         alias="OPENROUTER_BASE_URL",
     )
     openrouter_model: str = Field(alias="OPENROUTER_MODEL")
+    openrouter_vision_models: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        alias="OPENROUTER_VISION_MODELS",
+    )
     openrouter_site_url: str | None = Field(default=None, alias="OPENROUTER_SITE_URL")
     openrouter_site_name: str | None = Field(default=None, alias="OPENROUTER_SITE_NAME")
+    upload_dir: str = Field(default="uploads", alias="UPLOAD_DIR")
+
+    @property
+    def upload_dir_path(self) -> Path:
+        path = Path(self.upload_dir)
+        if not path.is_absolute():
+            path = Path(__file__).resolve().parent.parent.parent / self.upload_dir
+        return path
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -53,6 +66,17 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [v.strip() for v in value.split(",") if v.strip()]
         raise ValueError("CORS_ORIGINS must be a comma-separated string or list.")
+
+    @field_validator("openrouter_vision_models", mode="before")
+    @classmethod
+    def parse_openrouter_vision_models(cls, value: object) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(v).strip() for v in value if str(v).strip()]
+        if isinstance(value, str):
+            return [v.strip() for v in value.split(",") if v.strip()]
+        raise ValueError("OPENROUTER_VISION_MODELS must be a comma-separated string or list.")
 
 
 @lru_cache

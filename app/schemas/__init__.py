@@ -1,6 +1,12 @@
 from app.schemas.action_type import ActionTypeCreate, ActionTypeResponse, ActionTypeUpdate
 from app.schemas.auth import LoginRequest, RefreshRequest, RegisterRequest, TokenResponse
-from app.schemas.chat import AgentChatRequest, AgentChatResponse, AgentToolCall
+from app.schemas.chat import (
+    AgentChatRequest,
+    AgentChatResponse,
+    AgentToolCall,
+    ChatHistoryItem,
+    ChatHistoryResponse,
+)
 from app.schemas.note import NoteCreate, NoteResponse, NoteUpdate
 from app.schemas.plant import PlantCreate, PlantResponse, PlantUpdate
 from app.schemas.profile import ProfileSettingsResponse, ProfileSettingsUpdate
@@ -32,6 +38,8 @@ __all__ = [
     "AgentChatRequest",
     "AgentChatResponse",
     "AgentToolCall",
+    "ChatHistoryItem",
+    "ChatHistoryResponse",
     "LoginRequest",
     "NoteCreate",
     "NoteResponse",

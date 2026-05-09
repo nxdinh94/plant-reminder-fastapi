@@ -1,9 +1,11 @@
 import logging
+import os
 import time
 import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -17,6 +19,9 @@ app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
 )
+
+os.makedirs(str(settings.upload_dir_path), exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=str(settings.upload_dir_path)), name="uploads")
 
 if settings.cors_origins:
     app.add_middleware(

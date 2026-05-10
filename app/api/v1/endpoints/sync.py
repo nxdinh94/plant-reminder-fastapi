@@ -38,40 +38,66 @@ router = APIRouter()
 
 MODEL_MAP = {
     "plant": Plant,
+    "plants": Plant,
     "note": Note,
+    "notes": Note,
     "schedule": Schedule,
+    "schedules": Schedule,
     "task_completion": TaskCompletion,
+    "task_completions": TaskCompletion,
     "timeline": Timeline,
+    "timelines": Timeline,
     "action_type": ActionType,
+    "action_types": ActionType,
     "profile_setting": ProfileSetting,
+    "profile_settings": ProfileSetting,
 }
 
 CREATE_SCHEMA_MAP = {
     "plant": PlantCreate,
+    "plants": PlantCreate,
     "note": NoteCreate,
+    "notes": NoteCreate,
     "schedule": ScheduleCreate,
+    "schedules": ScheduleCreate,
     "task_completion": TaskCompletionCreate,
+    "task_completions": TaskCompletionCreate,
     "timeline": TimelineCreate,
+    "timelines": TimelineCreate,
     "action_type": ActionTypeCreate,
+    "action_types": ActionTypeCreate,
 }
 
 UPDATE_SCHEMA_MAP = {
     "plant": PlantUpdate,
+    "plants": PlantUpdate,
     "note": NoteUpdate,
+    "notes": NoteUpdate,
     "schedule": ScheduleUpdate,
+    "schedules": ScheduleUpdate,
     "task_completion": TaskCompletionUpdate,
+    "task_completions": TaskCompletionUpdate,
     "timeline": TimelineUpdate,
+    "timelines": TimelineUpdate,
     "action_type": ActionTypeUpdate,
+    "action_types": ActionTypeUpdate,
 }
 
 SYNC_ENTITIES = [
     SyncEntityCapability(name="plant"),
+    SyncEntityCapability(name="plants"),
     SyncEntityCapability(name="note"),
+    SyncEntityCapability(name="notes"),
     SyncEntityCapability(name="schedule"),
+    SyncEntityCapability(name="schedules"),
     SyncEntityCapability(name="task_completion"),
+    SyncEntityCapability(name="task_completions"),
     SyncEntityCapability(name="timeline"),
+    SyncEntityCapability(name="timelines"),
     SyncEntityCapability(name="action_type"),
+    SyncEntityCapability(name="action_types"),
     SyncEntityCapability(name="profile_setting"),
+    SyncEntityCapability(name="profile_settings"),
 ]
 
 SYNC_IDEMPOTENCY = SyncIdempotencyCapability()
@@ -275,7 +301,6 @@ def push_sync_operations(
                     error=None,
                 )
             )
-            db.commit()
             results.append(
                 SyncPushOperationResult(
                     operation_id=item.operation_id,
@@ -299,9 +324,8 @@ def push_sync_operations(
                         error=detail,
                     )
                 )
-                db.commit()
             except Exception:
-                db.rollback()
+                pass
             results.append(
                 SyncPushOperationResult(
                     operation_id=item.operation_id,
@@ -338,6 +362,7 @@ def push_sync_operations(
                 )
             )
 
+    db.commit()
     return SyncPushResponse(server_time=datetime.now(timezone.utc), results=results)
 
 

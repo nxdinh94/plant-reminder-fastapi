@@ -11,6 +11,7 @@ from app.api.v1.endpoints.schedules import router as schedules_router
 from app.api.v1.endpoints.sync import router as sync_router
 from app.api.v1.endpoints.task_completions import router as task_completions_router
 from app.api.v1.endpoints.timelines import router as timelines_router
+from app.api.v1.endpoints.uploads import router as uploads_router
 
 
 api_router = APIRouter()
@@ -25,3 +26,4 @@ api_router.include_router(notes_router)
 api_router.include_router(timelines_router)
 api_router.include_router(profile_router)
 api_router.include_router(sync_router, prefix="/sync")
+api_router.include_router(uploads_router)

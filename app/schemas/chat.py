@@ -38,6 +38,20 @@ class PlantDetectionData(BaseModel):
     species: str = Field(min_length=1, max_length=200)
     note: str = Field(min_length=1, max_length=1000)
     image_path: str = Field(default="")
+    overview: str | None = Field(default=None)
+    water: str | None = Field(default=None)
+    sunlight: str | None = Field(default=None)
+    fertilizer: str | None = Field(default=None)
+    propagating: str | None = Field(default=None)
+    varieties: list[str] = Field(default_factory=list)
+    humidity: str | None = Field(default=None)
+    temperature: str | None = Field(default=None)
+    soil: str | None = Field(default=None)
+    running: str | None = Field(default=None)
+    potting_and_repotting: str | None = Field(default=None)
+    pests_and_diseases: str | None = Field(default=None)
+    toxicity: str | None = Field(default=None)
+    propagation: str | None = Field(default=None)
 
 
 class PlantImageAnalyzeRequest(BaseModel):

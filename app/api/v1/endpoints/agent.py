@@ -231,6 +231,20 @@ def apply_plant_decision(
             name=decision.data.plant_name,
             species=decision.data.species,
             note=decision.data.note,
+            overview=decision.data.overview,
+            water=decision.data.water,
+            sunlight=decision.data.sunlight,
+            fertilizer=decision.data.fertilizer,
+            propagating=decision.data.propagating,
+            varieties=",".join(decision.data.varieties) if decision.data.varieties else None,
+            humidity=decision.data.humidity,
+            temperature=decision.data.temperature,
+            soil=decision.data.soil,
+            running=decision.data.running,
+            potting_and_repotting=decision.data.potting_and_repotting,
+            pests_and_diseases=decision.data.pests_and_diseases,
+            toxicity=decision.data.toxicity,
+            propagation=decision.data.propagation,
         )
         db.add(plant)
         db.commit()

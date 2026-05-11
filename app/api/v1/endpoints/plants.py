@@ -44,6 +44,20 @@ def _plant_to_response(plant: Plant) -> PlantResponse:
         "updated_at": plant.updated_at,
         "deleted_at": plant.deleted_at,
         "version": plant.version,
+        "overview": plant.overview,
+        "water": plant.water,
+        "sunlight": plant.sunlight,
+        "fertilizer": plant.fertilizer,
+        "propagating": plant.propagating,
+        "varieties": plant.varieties,
+        "humidity": plant.humidity,
+        "temperature": plant.temperature,
+        "soil": plant.soil,
+        "running": plant.running,
+        "potting_and_repotting": plant.potting_and_repotting,
+        "pests_and_diseases": plant.pests_and_diseases,
+        "toxicity": plant.toxicity,
+        "propagation": plant.propagation,
     }
     return PlantResponse(**data)
 

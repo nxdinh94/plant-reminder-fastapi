@@ -10,6 +10,20 @@ class PlantCreate(BaseModel):
     image_path: str | None = Field(default=None, max_length=1024)
     note: str | None = None
     is_paused: bool = False
+    overview: str | None = None
+    water: str | None = None
+    sunlight: str | None = None
+    fertilizer: str | None = None
+    propagating: str | None = None
+    varieties: str | None = None
+    humidity: str | None = None
+    temperature: str | None = None
+    soil: str | None = None
+    running: str | None = None
+    potting_and_repotting: str | None = None
+    pests_and_diseases: str | None = None
+    toxicity: str | None = None
+    propagation: str | None = None
 
 
 class PlantUpdate(BaseModel):
@@ -19,6 +33,20 @@ class PlantUpdate(BaseModel):
     image_path: str | None = Field(default=None, max_length=1024)
     note: str | None = None
     is_paused: bool | None = None
+    overview: str | None = None
+    water: str | None = None
+    sunlight: str | None = None
+    fertilizer: str | None = None
+    propagating: str | None = None
+    varieties: str | None = None
+    humidity: str | None = None
+    temperature: str | None = None
+    soil: str | None = None
+    running: str | None = None
+    potting_and_repotting: str | None = None
+    pests_and_diseases: str | None = None
+    toxicity: str | None = None
+    propagation: str | None = None
 
 
 class PlantResponse(BaseModel):
@@ -36,3 +64,17 @@ class PlantResponse(BaseModel):
     updated_at: datetime
     deleted_at: datetime | None
     version: int
+    overview: str | None = None
+    water: str | None = None
+    sunlight: str | None = None
+    fertilizer: str | None = None
+    propagating: str | None = None
+    varieties: str | None = None
+    humidity: str | None = None
+    temperature: str | None = None
+    soil: str | None = None
+    running: str | None = None
+    potting_and_repotting: str | None = None
+    pests_and_diseases: str | None = None
+    toxicity: str | None = None
+    propagation: str | None = None

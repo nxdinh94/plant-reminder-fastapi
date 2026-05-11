@@ -337,6 +337,20 @@ class LangGraphChatAgent:
                     "plant_name": detected.plant_name,
                     "species": detected.species,
                     "note": detected.note,
+                    "overview": detected.overview,
+                    "water": detected.water,
+                    "sunlight": detected.sunlight,
+                    "fertilizer": detected.fertilizer,
+                    "propagating": detected.propagating,
+                    "varieties": detected.varieties,
+                    "humidity": detected.humidity,
+                    "temperature": detected.temperature,
+                    "soil": detected.soil,
+                    "running": detected.running,
+                    "potting_and_repotting": detected.potting_and_repotting,
+                    "pests_and_diseases": detected.pests_and_diseases,
+                    "toxicity": detected.toxicity,
+                    "propagation": detected.propagation,
                 }
                 proposal = ChatPlantProposal(
                     user_id=user_id,
@@ -358,6 +372,20 @@ class LangGraphChatAgent:
                     species=detected.species,
                     note=detected.note,
                     image_path=image_path,
+                    overview=detected.overview,
+                    water=detected.water,
+                    sunlight=detected.sunlight,
+                    fertilizer=detected.fertilizer,
+                    propagating=detected.propagating,
+                    varieties=detected.varieties,
+                    humidity=detected.humidity,
+                    temperature=detected.temperature,
+                    soil=detected.soil,
+                    running=detected.running,
+                    potting_and_repotting=detected.potting_and_repotting,
+                    pests_and_diseases=detected.pests_and_diseases,
+                    toxicity=detected.toxicity,
+                    propagation=detected.propagation,
                 )
                 self._proposal_store[proposal_id] = detected_with_image
                 self._proposal_owner_by_id[proposal_id] = user_id
@@ -375,6 +403,20 @@ class LangGraphChatAgent:
                 species=detected.species,
                 note=detected.note,
                 image_path=_path_to_url(image_path),
+                overview=detected.overview,
+                water=detected.water,
+                sunlight=detected.sunlight,
+                fertilizer=detected.fertilizer,
+                propagating=detected.propagating,
+                varieties=detected.varieties,
+                humidity=detected.humidity,
+                temperature=detected.temperature,
+                soil=detected.soil,
+                running=detected.running,
+                potting_and_repotting=detected.potting_and_repotting,
+                pests_and_diseases=detected.pests_and_diseases,
+                toxicity=detected.toxicity,
+                propagation=detected.propagation,
             ),
             decision_required=True,
             decision_options=["accept", "reject", "edit"],
@@ -411,6 +453,20 @@ class LangGraphChatAgent:
                         species=payload.get("species", ""),
                         note=payload.get("note", ""),
                         image_path=_path_to_url(current.image_path),
+                        overview=payload.get("overview"),
+                        water=payload.get("water"),
+                        sunlight=payload.get("sunlight"),
+                        fertilizer=payload.get("fertilizer"),
+                        propagating=payload.get("propagating"),
+                        varieties=payload.get("varieties", []),
+                        humidity=payload.get("humidity"),
+                        temperature=payload.get("temperature"),
+                        soil=payload.get("soil"),
+                        running=payload.get("running"),
+                        potting_and_repotting=payload.get("potting_and_repotting"),
+                        pests_and_diseases=payload.get("pests_and_diseases"),
+                        toxicity=payload.get("toxicity"),
+                        propagation=payload.get("propagation"),
                     )
                     current.status = "approved"
                     db.commit()
@@ -439,6 +495,20 @@ class LangGraphChatAgent:
                         "plant_name": edited_data.plant_name,
                         "species": edited_data.species,
                         "note": edited_data.note,
+                        "overview": edited_data.overview,
+                        "water": edited_data.water,
+                        "sunlight": edited_data.sunlight,
+                        "fertilizer": edited_data.fertilizer,
+                        "propagating": edited_data.propagating,
+                        "varieties": edited_data.varieties,
+                        "humidity": edited_data.humidity,
+                        "temperature": edited_data.temperature,
+                        "soil": edited_data.soil,
+                        "running": edited_data.running,
+                        "potting_and_repotting": edited_data.potting_and_repotting,
+                        "pests_and_diseases": edited_data.pests_and_diseases,
+                        "toxicity": edited_data.toxicity,
+                        "propagation": edited_data.propagation,
                     }
                     current.revision = (current.revision or 1) + 1
                     db.commit()
@@ -465,6 +535,20 @@ class LangGraphChatAgent:
                         species=accepted_data.species,
                         note=accepted_data.note,
                         image_path=_path_to_url(accepted_data.image_path),
+                        overview=accepted_data.overview,
+                        water=accepted_data.water,
+                        sunlight=accepted_data.sunlight,
+                        fertilizer=accepted_data.fertilizer,
+                        propagating=accepted_data.propagating,
+                        varieties=accepted_data.varieties,
+                        humidity=accepted_data.humidity,
+                        temperature=accepted_data.temperature,
+                        soil=accepted_data.soil,
+                        running=accepted_data.running,
+                        potting_and_repotting=accepted_data.potting_and_repotting,
+                        pests_and_diseases=accepted_data.pests_and_diseases,
+                        toxicity=accepted_data.toxicity,
+                        propagation=accepted_data.propagation,
                     )
                     return PlantDecisionResponse(
                         status="accepted",
@@ -632,14 +716,27 @@ class LangGraphChatAgent:
             return None
 
         prompt = (
-            "First, describe the visible things in this image in one short sentence. "
-            "Then decide whether a plant is clearly present. "
-            "Return strict JSON only. "
-            "If a plant is clearly present, return: "
-            "{\"plant_name\":\"...\",\"species\":\"...\",\"note\":\"...\",\"description\":\"...\"}. "
+            "Analyze this plant image and return strict JSON only. "
+            "If a plant is clearly present, return a JSON object with ALL of these keys: "
+            "{\"plant_name\":\"...\",\"species\":\"...\",\"note\":\"...\","
+            "\"overview\":\"brief description of the plant (e.g. Weeping fig is an evergreen tree or large shrub, typically reaching heights of 10-30m. It has a dense and weeping crown...)\","
+            "\"water\":\"detailed watering guidance with frequency and soil dryness indicators (e.g. Water when top 2-3cm of soil feels dry, typically every 5-7 days in growing season)\","
+            "\"sunlight\":\"light placement guidance - where to put and where to avoid (e.g. Bright indirect light, avoid direct afternoon sun which can scorch leaves)\","
+            "\"fertilizer\":\"how and when to fertilize (e.g. Apply balanced liquid fertilizer every 2-4 weeks during spring and summer, reduce in fall and winter)\","
+            "\"propagating\":\"short practical propagation method summary (e.g. Stem cuttings in water or moist soil, best in spring)\","
+            "\"varieties\":[\"related variety 1\",\"related variety 2\"],"
+            "\"humidity\":\"useful humidity information with range (e.g. Prefers 50-70% humidity, mist leaves regularly or use a pebble tray)\","
+            "\"temperature\":\"suitable temperature range for growth (e.g. 18-27°C / 65-80°F, avoid cold drafts and temperatures below 15°C)\","
+            "\"soil\":\"soil type, pH range, and drainage requirements (e.g. Well-draining potting mix with pH 6.0-6.5, add perlite for drainage)\","
+            "\"running\":\"growth rate and habit information (e.g. Moderate to fast grower, can reach 1-2m indoors, weeping habit)\","
+            "\"potting_and_repotting\":\"when and how to repot (e.g. Repot every 1-2 years in spring, choose pot 2-5cm larger, refresh soil)\","
+            "\"pests_and_diseases\":\"common pests and diseases to watch for (e.g. Watch for spider mites, scale, and mealybugs; treat with neem oil)\","
+            "\"toxicity\":\"whether toxic to pets or humans (e.g. Toxic to cats and dogs if ingested, causes drooling and vomiting)\","
+            "\"propagation\":\"detailed step-by-step propagation guidance (e.g. 1) Take a 10-15cm stem cutting with 2-3 nodes... 2) Remove lower leaves... 3) Place in water or moist soil... 4) Keep warm and bright until roots develop in 2-4 weeks...)"
+            "}. "
             "If no plant is present or uncertain, return: "
             "{\"not_detected\": true, \"description\":\"...\"}. "
-            "Do not include markdown."
+            "Do not include markdown. Use cautious language like 'typically' or 'commonly' when uncertain."
         )
         raw = ""
         if self._vision_llm is not None:
@@ -712,10 +809,44 @@ class LangGraphChatAgent:
                 species = "Unknown"
             if not note:
                 note = "General care: bright indirect light, water when topsoil is dry, and avoid overwatering."
+
+            overview = payload.get("overview")
+            water = payload.get("water")
+            sunlight = payload.get("sunlight")
+            fertilizer = payload.get("fertilizer")
+            propagating = payload.get("propagating")
+            varieties = payload.get("varieties", [])
+            if isinstance(varieties, str):
+                varieties = [v.strip() for v in varieties.split(",") if v.strip()]
+            elif not isinstance(varieties, list):
+                varieties = []
+            humidity = payload.get("humidity")
+            temperature = payload.get("temperature")
+            soil = payload.get("soil")
+            running = payload.get("running")
+            potting_and_repotting = payload.get("potting_and_repotting")
+            pests_and_diseases = payload.get("pests_and_diseases")
+            toxicity = payload.get("toxicity")
+            propagation = payload.get("propagation")
+
             return PlantDetectionData(
                 plant_name=plant_name,
                 species=species,
                 note=note,
+                overview=overview if isinstance(overview, str) else None,
+                water=water if isinstance(water, str) else None,
+                sunlight=sunlight if isinstance(sunlight, str) else None,
+                fertilizer=fertilizer if isinstance(fertilizer, str) else None,
+                propagating=propagating if isinstance(propagating, str) else None,
+                varieties=varieties,
+                humidity=humidity if isinstance(humidity, str) else None,
+                temperature=temperature if isinstance(temperature, str) else None,
+                soil=soil if isinstance(soil, str) else None,
+                running=running if isinstance(running, str) else None,
+                potting_and_repotting=potting_and_repotting if isinstance(potting_and_repotting, str) else None,
+                pests_and_diseases=pests_and_diseases if isinstance(pests_and_diseases, str) else None,
+                toxicity=toxicity if isinstance(toxicity, str) else None,
+                propagation=propagation if isinstance(propagation, str) else None,
             )
         except Exception:
             logger.warning("Plant image analyze failed: JSON missing expected keys payload=%r", payload)

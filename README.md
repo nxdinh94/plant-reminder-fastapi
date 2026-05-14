@@ -119,3 +119,10 @@ OPENROUTER_SITE_NAME=Plant Reminder API
 ```
 
 When `OPENROUTER_API_KEY` is not provided, the agent falls back to local small-talk handling only.
+
+## Knowledge Seed
+- Start Postgres: docker compose up -d db
+- Run migrations: lembic upgrade head
+- Seed knowledge catalog: python -m app.scripts.seed_knowledge
+- Start API: docker compose up -d api
+

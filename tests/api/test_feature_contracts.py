@@ -95,28 +95,6 @@ def test_feature_crud_contracts(client: TestClient) -> None:
     )
     assert invalid_note_response.status_code == 422
 
-    timeline_response = client.post(
-        "/api/v1/timelines",
-        json={
-            "plant_id": plant_id,
-            "image_path": "/local/timeline/img1.jpg",
-            "description": "Repotted",
-        },
-        headers=headers,
-    )
-    assert timeline_response.status_code == 201
-
-    invalid_timeline_response = client.post(
-        "/api/v1/timelines",
-        json={
-            "plant_id": plant_id,
-            "image_path": "https://example.com/image.jpg",
-            "description": "Should fail",
-        },
-        headers=headers,
-    )
-    assert invalid_timeline_response.status_code == 422
-
     profile_get = client.get("/api/v1/profile/settings", headers=headers)
     assert profile_get.status_code == 200
 

@@ -14,7 +14,7 @@ from app.dependencies.auth import get_current_user
 from app.models.user import User
 from app.models.profile_setting import ProfileSetting
 from app.models.sync_operation import SyncOperation
-from app.models import Plant, Note, Schedule, TaskCompletion, Timeline, ActionType
+from app.models import Plant, Note, Schedule, TaskCompletion, ActionType
 from app.schemas.sync import (
     SyncBootstrapResponse,
     SyncCapabilitiesResponse,
@@ -31,7 +31,6 @@ from app.schemas.plant import PlantCreate, PlantUpdate
 from app.schemas.note import NoteCreate, NoteUpdate
 from app.schemas.schedule import ScheduleCreate, ScheduleUpdate
 from app.schemas.task_completion import TaskCompletionCreate, TaskCompletionUpdate
-from app.schemas.timeline import TimelineCreate, TimelineUpdate
 from app.schemas.action_type import ActionTypeCreate, ActionTypeUpdate
 
 router = APIRouter()
@@ -45,8 +44,6 @@ MODEL_MAP = {
     "schedules": Schedule,
     "task_completion": TaskCompletion,
     "task_completions": TaskCompletion,
-    "timeline": Timeline,
-    "timelines": Timeline,
     "action_type": ActionType,
     "action_types": ActionType,
     "profile_setting": ProfileSetting,
@@ -62,8 +59,6 @@ CREATE_SCHEMA_MAP = {
     "schedules": ScheduleCreate,
     "task_completion": TaskCompletionCreate,
     "task_completions": TaskCompletionCreate,
-    "timeline": TimelineCreate,
-    "timelines": TimelineCreate,
     "action_type": ActionTypeCreate,
     "action_types": ActionTypeCreate,
 }
@@ -77,8 +72,6 @@ UPDATE_SCHEMA_MAP = {
     "schedules": ScheduleUpdate,
     "task_completion": TaskCompletionUpdate,
     "task_completions": TaskCompletionUpdate,
-    "timeline": TimelineUpdate,
-    "timelines": TimelineUpdate,
     "action_type": ActionTypeUpdate,
     "action_types": ActionTypeUpdate,
 }
@@ -92,8 +85,6 @@ SYNC_ENTITIES = [
     SyncEntityCapability(name="schedules"),
     SyncEntityCapability(name="task_completion"),
     SyncEntityCapability(name="task_completions"),
-    SyncEntityCapability(name="timeline"),
-    SyncEntityCapability(name="timelines"),
     SyncEntityCapability(name="action_type"),
     SyncEntityCapability(name="action_types"),
     SyncEntityCapability(name="profile_setting"),

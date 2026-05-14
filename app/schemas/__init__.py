@@ -7,6 +7,11 @@ from app.schemas.chat import (
     ChatHistoryItem,
     ChatHistoryResponse,
 )
+from app.schemas.knowledge import (
+    KnowledgeArticleDetail,
+    KnowledgeArticleSummary,
+    KnowledgeTopicSummary,
+)
 from app.schemas.note import NoteCreate, NoteResponse, NoteUpdate
 from app.schemas.plant import PlantCreate, PlantResponse, PlantUpdate
 from app.schemas.profile import ProfileSettingsResponse, ProfileSettingsUpdate
@@ -29,7 +34,6 @@ from app.schemas.task_completion import (
     TaskCompletionToggleRequest,
     TaskCompletionUpdate,
 )
-from app.schemas.timeline import TimelineCreate, TimelineResponse, TimelineUpdate
 
 __all__ = [
     "ActionTypeCreate",
@@ -40,6 +44,9 @@ __all__ = [
     "AgentToolCall",
     "ChatHistoryItem",
     "ChatHistoryResponse",
+    "KnowledgeArticleDetail",
+    "KnowledgeArticleSummary",
+    "KnowledgeTopicSummary",
     "LoginRequest",
     "NoteCreate",
     "NoteResponse",
@@ -71,7 +78,4 @@ __all__ = [
     "TaskCompletionResponse",
     "TaskCompletionToggleRequest",
     "TaskCompletionUpdate",
-    "TimelineCreate",
-    "TimelineResponse",
-    "TimelineUpdate",
 ]

@@ -32,7 +32,7 @@ def _get_small_talk_llm():
         settings.openrouter_model,
         model_provider="openai",
         api_key=settings.openrouter_api_key,
-        base_url=settings.openrouter_base_url,
+        base_url=settings.PROXY_BASE_URL,
         default_headers={
             "HTTP-Referer": settings.openrouter_site_url or "",
             "X-OpenRouter-Title": settings.openrouter_site_name or "",
@@ -57,7 +57,7 @@ def _invoke_openrouter_small_talk(message: str) -> tuple[str | None, str | None]
     }
     body = json.dumps(payload).encode("utf-8")
     req = request.Request(
-        url=f"{settings.openrouter_base_url.rstrip('/')}/chat/completions",
+        url=f"{settings.PROXY_BASE_URL.rstrip('/')}/chat/completions",
         data=body,
         headers={
             "Authorization": f"Bearer {settings.openrouter_api_key}",

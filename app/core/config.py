@@ -36,9 +36,9 @@ class Settings(BaseSettings):
     bcrypt_rounds: int = Field(default=12, alias="BCRYPT_ROUNDS")
     cors_origins: Annotated[list[str], NoDecode] = Field(default_factory=list, alias="CORS_ORIGINS")
     openrouter_api_key: str | None = Field(default=None, alias="OPENROUTER_API_KEY")
-    openrouter_base_url: str = Field(
+    PROXY_BASE_URL: str = Field(
         default="https://openrouter.ai/api/v1",
-        alias="OPENROUTER_BASE_URL",
+        alias="PROXY_BASE_URL",
     )
     openrouter_model: str = Field(alias="OPENROUTER_MODEL")
     openrouter_vision_models: Annotated[list[str], NoDecode] = Field(

@@ -112,7 +112,7 @@ Set these in `.env` to enable model-backed agent chat:
 
 ```env
 OPENROUTER_API_KEY=your_key_here
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+PROXY_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_MODEL=google/gemini-3.1-flash-lite
 OPENROUTER_SITE_URL=https://your-app-url.example
 OPENROUTER_SITE_NAME=Plant Reminder API

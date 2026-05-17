@@ -135,7 +135,7 @@ class LangGraphChatAgent:
                 settings.openrouter_model,
                 model_provider="openai",
                 api_key=settings.openrouter_api_key,
-                base_url=settings.openrouter_base_url,
+                base_url=settings.PROXY_BASE_URL,
                 default_headers={
                     "HTTP-Referer": settings.openrouter_site_url or "",
                     "X-OpenRouter-Title": settings.openrouter_site_name or "",
@@ -163,7 +163,7 @@ class LangGraphChatAgent:
             settings.openrouter_model,
             model_provider="openai",
             api_key=settings.openrouter_api_key,
-            base_url=settings.openrouter_base_url,
+            base_url=settings.PROXY_BASE_URL,
             default_headers={
                 "HTTP-Referer": settings.openrouter_site_url or "",
                 "X-OpenRouter-Title": settings.openrouter_site_name or "",
@@ -1023,7 +1023,7 @@ class LangGraphChatAgent:
             headers["X-OpenRouter-Title"] = settings.openrouter_site_name
 
         req = urllib_request.Request(
-            url=f"{settings.openrouter_base_url}/chat/completions",
+            url=f"{settings.PROXY_BASE_URL}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
             headers=headers,
             method="POST",

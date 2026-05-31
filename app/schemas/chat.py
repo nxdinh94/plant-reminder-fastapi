@@ -58,6 +58,7 @@ class PlantImageAnalyzeRequest(BaseModel):
     image_base64: str = Field(min_length=20)
     message: str | None = Field(default=None)
     thread_id: str | None = Field(default=None, min_length=1, max_length=200)
+    is_manual_creation: bool = False
 
 
 class PlantImageAnalyzeResponse(BaseModel):

@@ -478,8 +478,9 @@ class LangGraphChatAgent:
         db: Session,
         message: str | None = None,
         thread_id: str | None = None,
+        is_manual_creation: bool = False,
     ) -> PlantImageAnalyzeResponse:
-        if message:
+        if message and not is_manual_creation:
             intent = self._classify_intent(message)
             if intent == "QUESTION":
                 reply = self._answer_question_with_image(message, image_base64)
@@ -499,54 +500,19 @@ class LangGraphChatAgent:
                     decision_options=[],
                 )
 
-        with self._proposal_lock:
-            try:
-                pending = (
-                    db.query(ChatPlantProposal)
-                    .filter(
-                        ChatPlantProposal.user_id == user_id,
-                        ChatPlantProposal.status == "pending",
-                    )
-                    .one_or_none()
-                )
-                if pending is not None:
-                    payload = pending.proposal_payload
-                    reply = (
-                        "A decision is still pending for your previous image. "
-                        "Please accept, reject, or edit that result before sending another image."
-                    )
-                    if thread_id:
-                        user_text = message.strip() if message else ""
-                        if not user_text:
-                            user_text = "Uploaded a plant image."
-                        else:
-                            user_text = f"{user_text} [Uploaded a plant image.]"
-                        self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
-                    return PlantImageAnalyzeResponse(
-                        status="detected",
-                        reply=reply,
-                        proposal_id=pending.id,
-                        data=PlantDetectionData(
-                            plant_name=payload.get("plant_name", ""),
-                            species=payload.get("species", ""),
-                            note=payload.get("note", ""),
-                            image_path=_path_to_url(pending.image_path),
-                        ),
-                        decision_required=True,
-                        decision_options=["accept", "reject", "edit"],
-                    )
-            except ProgrammingError:
-                db.rollback()
-                pending_proposal_id = self._pending_proposal_by_owner.get(user_id)
-                if pending_proposal_id is not None:
-                    pending_data = self._proposal_store.get(pending_proposal_id)
-                    if pending_data is not None:
-                        pending_data_with_url = PlantDetectionData(
-                            plant_name=pending_data.plant_name,
-                            species=pending_data.species,
-                            note=pending_data.note,
-                            image_path=_path_to_url(pending_data.image_path),
+        if not is_manual_creation:
+            with self._proposal_lock:
+                try:
+                    pending = (
+                        db.query(ChatPlantProposal)
+                        .filter(
+                            ChatPlantProposal.user_id == user_id,
+                            ChatPlantProposal.status == "pending",
                         )
+                        .one_or_none()
+                    )
+                    if pending is not None:
+                        payload = pending.proposal_payload
                         reply = (
                             "A decision is still pending for your previous image. "
                             "Please accept, reject, or edit that result before sending another image."
@@ -561,11 +527,47 @@ class LangGraphChatAgent:
                         return PlantImageAnalyzeResponse(
                             status="detected",
                             reply=reply,
-                            proposal_id=pending_proposal_id,
-                            data=pending_data_with_url,
+                            proposal_id=pending.id,
+                            data=PlantDetectionData(
+                                plant_name=payload.get("plant_name", ""),
+                                species=payload.get("species", ""),
+                                note=payload.get("note", ""),
+                                image_path=_path_to_url(pending.image_path),
+                            ),
                             decision_required=True,
                             decision_options=["accept", "reject", "edit"],
                         )
+                except ProgrammingError:
+                    db.rollback()
+                    pending_proposal_id = self._pending_proposal_by_owner.get(user_id)
+                    if pending_proposal_id is not None:
+                        pending_data = self._proposal_store.get(pending_proposal_id)
+                        if pending_data is not None:
+                            pending_data_with_url = PlantDetectionData(
+                                plant_name=pending_data.plant_name,
+                                species=pending_data.species,
+                                note=pending_data.note,
+                                image_path=_path_to_url(pending_data.image_path),
+                            )
+                            reply = (
+                                "A decision is still pending for your previous image. "
+                                "Please accept, reject, or edit that result before sending another image."
+                            )
+                            if thread_id:
+                                user_text = message.strip() if message else ""
+                                if not user_text:
+                                    user_text = "Uploaded a plant image."
+                                else:
+                                    user_text = f"{user_text} [Uploaded a plant image.]"
+                                self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
+                            return PlantImageAnalyzeResponse(
+                                status="detected",
+                                reply=reply,
+                                proposal_id=pending_proposal_id,
+                                data=pending_data_with_url,
+                                decision_required=True,
+                                decision_options=["accept", "reject", "edit"],
+                            )
 
         detected = self._detect_plant(image_base64)
         if detected is None:
@@ -611,6 +613,36 @@ class LangGraphChatAgent:
                 status="not_detected",
                 reply=reply,
                 decision_required=False,
+            )
+
+        if is_manual_creation:
+            reply = "I detected a plant and prepared the information below."
+            return PlantImageAnalyzeResponse(
+                status="detected",
+                reply=reply,
+                proposal_id=None,
+                data=PlantDetectionData(
+                    plant_name=detected.plant_name,
+                    species=detected.species,
+                    note=detected.note,
+                    image_path=_path_to_url(image_path),
+                    overview=detected.overview,
+                    water=detected.water,
+                    sunlight=detected.sunlight,
+                    fertilizer=detected.fertilizer,
+                    propagating=detected.propagating,
+                    varieties=detected.varieties,
+                    humidity=detected.humidity,
+                    temperature=detected.temperature,
+                    soil=detected.soil,
+                    running=detected.running,
+                    potting_and_repotting=detected.potting_and_repotting,
+                    pests_and_diseases=detected.pests_and_diseases,
+                    toxicity=detected.toxicity,
+                    propagation=detected.propagation,
+                ),
+                decision_required=False,
+                decision_options=[],
             )
 
         with self._proposal_lock:

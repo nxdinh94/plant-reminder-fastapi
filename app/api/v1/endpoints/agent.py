@@ -201,6 +201,7 @@ def analyze_plant_image(
             db=db,
             message=payload.message,
             thread_id=payload.thread_id,
+            is_manual_creation=payload.is_manual_creation,
         )
         logger.info("Plant image analyze response body: %s", result.model_dump_json())
         return result

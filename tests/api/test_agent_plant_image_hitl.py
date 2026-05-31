@@ -135,3 +135,99 @@ def test_plant_image_second_analyze_blocked_until_decision(client: TestClient) -
         assert "decision is still pending" in second_payload["reply"].lower()
     finally:
         agent._detect_plant = original
+
+
+def test_plant_image_analyze_with_question(client: TestClient) -> None:
+    headers = register_and_auth_headers(client, "plant-image-question@example.com")
+
+    original_classify = agent._classify_intent
+    original_answer = agent._answer_question_with_image
+
+    agent._classify_intent = lambda _msg: "QUESTION"
+    agent._answer_question_with_image = lambda _msg, _img: "This looks like a Monstera deliciosa."
+
+    try:
+        response = client.post(
+            "/api/v1/agent/plant-image/analyze",
+            json={
+                "message": "is this plant healthy?",
+                "image_base64": "dGVzdA==dGVzdA==dGVzdA==dGVzdA==",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["status"] == "detected"
+        assert payload["reply"] == "This looks like a Monstera deliciosa."
+        assert payload["decision_required"] is False
+        assert payload["proposal_id"] is None
+        assert payload["data"] is None
+    finally:
+        agent._classify_intent = original_classify
+        agent._answer_question_with_image = original_answer
+
+
+def test_plant_image_analyze_and_decision_saves_history_to_chat(client: TestClient) -> None:
+    headers = register_and_auth_headers(client, "plant-history-test@example.com")
+    thread_id = "test-thread-id-999"
+
+    original = agent._detect_plant
+    agent._detect_plant = lambda _img: PlantDetectionData(
+        plant_name="Fern",
+        species="Nephrolepis exaltata",
+        note="Keep moist and warm.",
+    )
+    try:
+        # 1. Post to analyze
+        analyze = client.post(
+            "/api/v1/agent/plant-image/analyze",
+            json={
+                "image_base64": "dGVzdA==dGVzdA==dGVzdA==dGVzdA==",
+                "thread_id": thread_id,
+            },
+            headers=headers,
+        )
+        assert analyze.status_code == 200
+        proposal_id = analyze.json()["proposal_id"]
+
+        # Verify SQL history has the uploaded image and analysis proposals
+        history_after_analyze = client.get(
+            f"/api/v1/agent/chat/history?thread_id={thread_id}",
+            headers=headers,
+        )
+        assert history_after_analyze.status_code == 200
+        items = history_after_analyze.json()["items"]
+        assert len(items) == 2
+        assert items[0]["role"] == "user"
+        assert "Uploaded a plant image" in items[0]["content"]
+        assert items[1]["role"] == "assistant"
+        assert "I detected a plant" in items[1]["content"]
+
+        # 2. Reject decision
+        decision = client.post(
+            "/api/v1/agent/plant-image/decision",
+            json={
+                "proposal_id": proposal_id,
+                "decision": "reject",
+                "thread_id": thread_id,
+            },
+            headers=headers,
+        )
+        assert decision.status_code == 200
+
+        # Verify SQL history has decision actions recorded
+        history_after_decision = client.get(
+            f"/api/v1/agent/chat/history?thread_id={thread_id}",
+            headers=headers,
+        )
+        assert history_after_decision.status_code == 200
+        items_dec = history_after_decision.json()["items"]
+        assert len(items_dec) == 4
+        assert items_dec[2]["role"] == "user"
+        assert "I reject the proposal" in items_dec[2]["content"]
+        assert items_dec[3]["role"] == "assistant"
+        assert "Understood" in items_dec[3]["content"]
+
+    finally:
+        agent._detect_plant = original
+

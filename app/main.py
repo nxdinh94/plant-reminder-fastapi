@@ -2,6 +2,7 @@ import logging
 import os
 import time
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,9 +16,21 @@ from app.core.logging import configure_logging
 configure_logging(settings.log_level)
 logger = logging.getLogger("app.main")
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    try:
+        from app.services.agent_chat import agent
+        agent.close_pool()
+    except Exception:
+        logger.exception("Failed to close connection pool during shutdown")
+
+
 app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
+    lifespan=lifespan,
 )
 
 os.makedirs(str(settings.upload_dir_path), exist_ok=True)

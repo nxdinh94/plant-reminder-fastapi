@@ -195,7 +195,13 @@ def analyze_plant_image(
             len(payload.image_base64),
             preview,
         )
-        result = agent.analyze_plant_image(payload.image_base64, user_id=user_id, db=db)
+        result = agent.analyze_plant_image(
+            payload.image_base64,
+            user_id=user_id,
+            db=db,
+            message=payload.message,
+            thread_id=payload.thread_id,
+        )
         logger.info("Plant image analyze response body: %s", result.model_dump_json())
         return result
     except Exception:
@@ -222,6 +228,7 @@ def apply_plant_decision(
             payload.edited_data,
             user_id=str(current_user.id),
             db=db,
+            thread_id=payload.thread_id,
         )
         if decision.status != "accepted" or decision.data is None:
             return decision

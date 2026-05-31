@@ -20,10 +20,12 @@ try:
     from langchain.chat_models import init_chat_model
     from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
     from langchain_core.tools import tool
-    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.checkpoint.postgres import PostgresSaver
     from langgraph.graph import END, START, MessagesState, StateGraph
     from langgraph.prebuilt import ToolNode
     from langgraph.types import Command
+    from psycopg_pool import ConnectionPool
+    from psycopg.rows import dict_row
 
     _LANGCHAIN_AVAILABLE = True
 except ModuleNotFoundError:
@@ -122,8 +124,27 @@ class LangGraphChatAgent:
         self._vision_enabled = bool(settings.openrouter_api_key)
         self._llm: Any | None = None
         self._vision_llm: Any | None = None
-        self._checkpointer = MemorySaver() if _LANGCHAIN_AVAILABLE else None
-        self._graph = self._build_graph() if self._llm_enabled else None
+        self._pool: ConnectionPool | None = None
+        self._checkpointer = None
+        if _LANGCHAIN_AVAILABLE:
+            conn_url = settings.database_url
+            if conn_url.startswith("postgresql+psycopg://"):
+                conn_url = conn_url.replace("postgresql+psycopg://", "postgresql://", 1)
+            elif conn_url.startswith("postgresql+psycopg2://"):
+                conn_url = conn_url.replace("postgresql+psycopg2://", "postgresql://", 1)
+            try:
+                self._pool = ConnectionPool(
+                    conninfo=conn_url,
+                    max_size=10,
+                    kwargs={"autocommit": True, "row_factory": dict_row},
+                )
+                self._checkpointer = PostgresSaver(self._pool)
+                self._checkpointer.setup()
+            except Exception:
+                logger.exception("Failed to initialize LangGraph PostgresSaver checkpointer; memory will be disabled")
+                self._pool = None
+                self._checkpointer = None
+
         # Fallback storage when migration is not yet applied.
         self._proposal_store: dict[str, PlantDetectionData] = {}
         self._proposal_owner_by_id: dict[str, str] = {}
@@ -142,6 +163,15 @@ class LangGraphChatAgent:
                 },
                 temperature=0.1,
             )
+        self._graph = self._build_graph() if self._llm_enabled else None
+
+    def close_pool(self) -> None:
+        if hasattr(self, "_pool") and self._pool is not None:
+            try:
+                self._pool.close()
+                logger.info("Closed LangGraph Postgres checkpointer connection pool.")
+            except Exception:
+                logger.exception("Error closing LangGraph Postgres checkpointer connection pool.")
 
     def _build_graph(self) -> Any:
         @tool("plant_image_detect_tool")
@@ -195,6 +225,87 @@ class LangGraphChatAgent:
         graph.add_edge("tools", "assistant")
         return graph.compile(checkpointer=self._checkpointer)
 
+    def _classify_intent(self, message: str) -> str:
+        """Classify if the user wants to CREATE/add a plant reminder, or just ask a QUESTION."""
+        cleaned_msg = message.strip()
+        if not cleaned_msg or cleaned_msg.lower() in [
+            "sent a plant image",
+            "uploaded a plant image",
+            "uploaded a plant image.",
+            "sent a plant image.",
+            "analyze this image",
+            "tell me about this plant",
+        ]:
+            return "CREATE"
+
+        prompt = (
+            f"The user uploaded a plant image and sent this message: \"{cleaned_msg}\"\n"
+            "Does the user want to create/add/register this plant to their library/reminders list, "
+            "or are they just asking a general question/identifying the plant/asking for advice/having small talk?\n"
+            "Respond with exactly one word: 'CREATE' (if they want to create/add/register/save a reminder for the plant) "
+            "or 'QUESTION' (if they are asking a question, identifying the plant, or chatting without requesting to save/create a reminder)."
+        )
+        try:
+            if not _LANGCHAIN_AVAILABLE:
+                return "CREATE"
+            llm_to_use = self._vision_llm or self._llm
+            if llm_to_use is not None:
+                response = llm_to_use.invoke(
+                    [
+                        SystemMessage(content="You are an intent classification assistant. Respond only with 'CREATE' or 'QUESTION'."),
+                        HumanMessage(content=prompt),
+                    ]
+                )
+                raw_classification = self._chunk_text(response.content).strip().upper()
+                if "QUESTION" in raw_classification:
+                    return "QUESTION"
+            return "CREATE"
+        except Exception:
+            logger.exception("Failed to classify user intent; defaulting to CREATE")
+            return "CREATE"
+
+    def _answer_question_with_image(self, message: str, image_base64: str) -> str:
+        """Answer the user's question using the plant image."""
+        data_url = self._normalize_to_data_url(image_base64)
+        if data_url is None:
+            return "I couldn't read the image. Please upload a clear photo of the plant."
+
+        prompt = (
+            f"The user has uploaded a plant image and asked: \"{message}\"\n"
+            "Please analyze the image and answer their question directly, clearly, and concisely."
+        )
+        try:
+            if _LANGCHAIN_AVAILABLE and self._vision_llm is not None:
+                response = self._vision_llm.invoke(
+                    [
+                        SystemMessage(content="You are a helpful plant care assistant. Answer the user's question based on the image."),
+                        HumanMessage(
+                            content=[
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                            ]
+                        ),
+                    ]
+                )
+                return self._chunk_text(response.content).strip()
+        except Exception:
+            logger.exception("Failed to invoke self._vision_llm for question")
+
+        # Fallback to model candidates
+        for model in self._vision_model_candidates():
+            try:
+                raw = self._invoke_vision_openrouter_rest(prompt, data_url, model)
+                if raw:
+                    return raw
+            except TypeError:
+                raw = self._invoke_vision_openrouter_rest(prompt, data_url)
+                if raw:
+                    return raw
+            except Exception:
+                logger.exception("Failed to call vision model %s", model)
+
+        return "I couldn't analyze the plant image to answer your question right now. Please try again."
+
     def chat(
         self,
         message: str,
@@ -203,6 +314,40 @@ class LangGraphChatAgent:
         resume_interrupt: bool = False,
     ) -> AgentChatResponse:
         if image_base64:
+            intent = self._classify_intent(message) if message else "CREATE"
+            if intent == "QUESTION":
+                reply_content = self._answer_question_with_image(message, image_base64)
+                if thread_id and self._graph is not None and _LANGCHAIN_AVAILABLE:
+                    config = {"configurable": {"thread_id": thread_id}}
+                    try:
+                        snapshot = self._graph.get_state(config)
+                        has_history = bool(snapshot.values and snapshot.values.get("messages"))
+                    except Exception:
+                        has_history = False
+
+                    new_messages = []
+                    if not has_history:
+                        new_messages.append(SystemMessage(content=SYSTEM_PROMPT))
+                    
+                    user_content = message.strip() if message else ""
+                    if not user_content:
+                        user_content = "Uploaded a plant image."
+                    else:
+                        user_content = f"{user_content} [Uploaded a plant image.]"
+                    
+                    new_messages.append(HumanMessage(content=user_content))
+                    new_messages.append(AIMessage(content=reply_content))
+                    
+                    try:
+                        self._graph.update_state(config, {"messages": new_messages})
+                    except Exception:
+                        logger.exception("Failed to update LangGraph state with image chat message")
+
+                return AgentChatResponse(
+                    reply=reply_content,
+                    tool_calls=[],
+                )
+
             detected = self._detect_plant(image_base64)
             if detected is None:
                 payload = {
@@ -218,8 +363,37 @@ class LangGraphChatAgent:
                         "note": detected.note,
                     },
                 }
+            
+            reply_content = json.dumps(payload, ensure_ascii=False)
+
+            if thread_id and self._graph is not None:
+                config = {"configurable": {"thread_id": thread_id}}
+                try:
+                    snapshot = self._graph.get_state(config)
+                    has_history = bool(snapshot.values and snapshot.values.get("messages"))
+                except Exception:
+                    has_history = False
+
+                new_messages = []
+                if not has_history:
+                    new_messages.append(SystemMessage(content=SYSTEM_PROMPT))
+                
+                user_content = message.strip() if message else ""
+                if not user_content:
+                    user_content = "Uploaded a plant image."
+                else:
+                    user_content = f"{user_content} [Uploaded a plant image.]"
+                
+                new_messages.append(HumanMessage(content=user_content))
+                new_messages.append(AIMessage(content=reply_content))
+                
+                try:
+                    self._graph.update_state(config, {"messages": new_messages})
+                except Exception:
+                    logger.exception("Failed to update LangGraph state with image chat message")
+
             return AgentChatResponse(
-                reply=json.dumps(payload, ensure_ascii=False),
+                reply=reply_content,
                 tool_calls=[AgentToolCall(name="plant_image_detect_tool")],
             )
 
@@ -243,7 +417,88 @@ class LangGraphChatAgent:
         tool_calls = self._extract_tool_calls(response_messages)
         return AgentChatResponse(reply=reply, tool_calls=tool_calls)
 
-    def analyze_plant_image(self, image_base64: str, user_id: str, db: Session) -> PlantImageAnalyzeResponse:
+    def _save_both_histories(
+        self,
+        db: Session,
+        user_id: str,
+        thread_id: str,
+        user_message: str,
+        assistant_sql_message: str,
+        assistant_graph_message: str,
+    ) -> None:
+        from app.models.chat_message import ChatMessage
+        from datetime import datetime, timezone, timedelta
+        try:
+            now = datetime.now(timezone.utc)
+            user_msg = ChatMessage(
+                user_id=user_id,
+                thread_id=thread_id,
+                role="user",
+                content=user_message,
+                created_at=now,
+            )
+            db.add(user_msg)
+            
+            assistant_msg = ChatMessage(
+                user_id=user_id,
+                thread_id=thread_id,
+                role="assistant",
+                content=assistant_sql_message,
+                created_at=now + timedelta(milliseconds=1),
+            )
+            db.add(assistant_msg)
+            db.commit()
+        except Exception:
+            db.rollback()
+            logger.exception("Failed to save conversation history to SQL database")
+
+        if self._graph is not None and _LANGCHAIN_AVAILABLE and self._checkpointer is not None:
+            config = {"configurable": {"thread_id": thread_id}}
+            try:
+                snapshot = self._graph.get_state(config)
+                has_history = bool(snapshot.values and snapshot.values.get("messages"))
+            except Exception:
+                has_history = False
+
+            new_messages = []
+            if not has_history:
+                new_messages.append(SystemMessage(content=SYSTEM_PROMPT))
+            new_messages.append(HumanMessage(content=user_message))
+            new_messages.append(AIMessage(content=assistant_graph_message))
+
+            try:
+                self._graph.update_state(config, {"messages": new_messages})
+            except Exception:
+                logger.exception("Failed to update LangGraph state with conversation messages")
+
+    def analyze_plant_image(
+        self,
+        image_base64: str,
+        user_id: str,
+        db: Session,
+        message: str | None = None,
+        thread_id: str | None = None,
+    ) -> PlantImageAnalyzeResponse:
+        if message:
+            intent = self._classify_intent(message)
+            if intent == "QUESTION":
+                reply = self._answer_question_with_image(message, image_base64)
+                if thread_id:
+                    user_text = message.strip()
+                    if not user_text:
+                        user_text = "Uploaded a plant image."
+                    else:
+                        user_text = f"{user_text} [Uploaded a plant image.]"
+                    self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
+                return PlantImageAnalyzeResponse(
+                    status="detected",
+                    reply=reply,
+                    decision_required=False,
+                    data=None,
+                    proposal_id=None,
+                    decision_options=[],
+                )
+
         with self._proposal_lock:
             try:
                 pending = (
@@ -256,12 +511,20 @@ class LangGraphChatAgent:
                 )
                 if pending is not None:
                     payload = pending.proposal_payload
+                    reply = (
+                        "A decision is still pending for your previous image. "
+                        "Please accept, reject, or edit that result before sending another image."
+                    )
+                    if thread_id:
+                        user_text = message.strip() if message else ""
+                        if not user_text:
+                            user_text = "Uploaded a plant image."
+                        else:
+                            user_text = f"{user_text} [Uploaded a plant image.]"
+                        self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
                     return PlantImageAnalyzeResponse(
                         status="detected",
-                        reply=(
-                            "A decision is still pending for your previous image. "
-                            "Please accept, reject, or edit that result before sending another image."
-                        ),
+                        reply=reply,
                         proposal_id=pending.id,
                         data=PlantDetectionData(
                             plant_name=payload.get("plant_name", ""),
@@ -284,12 +547,20 @@ class LangGraphChatAgent:
                             note=pending_data.note,
                             image_path=_path_to_url(pending_data.image_path),
                         )
+                        reply = (
+                            "A decision is still pending for your previous image. "
+                            "Please accept, reject, or edit that result before sending another image."
+                        )
+                        if thread_id:
+                            user_text = message.strip() if message else ""
+                            if not user_text:
+                                user_text = "Uploaded a plant image."
+                            else:
+                                user_text = f"{user_text} [Uploaded a plant image.]"
+                            self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
                         return PlantImageAnalyzeResponse(
                             status="detected",
-                            reply=(
-                                "A decision is still pending for your previous image. "
-                                "Please accept, reject, or edit that result before sending another image."
-                            ),
+                            reply=reply,
                             proposal_id=pending_proposal_id,
                             data=pending_data_with_url,
                             decision_required=True,
@@ -299,35 +570,46 @@ class LangGraphChatAgent:
         detected = self._detect_plant(image_base64)
         if detected is None:
             if self._last_plant_image_failure_reason == "provider_error":
-                return PlantImageAnalyzeResponse(
-                    status="not_detected",
-                    reply=(
-                        "Image analysis is temporarily unavailable due to an AI service issue. "
-                        "Please try again in a moment."
-                    ),
-                    decision_required=False,
+                reply = (
+                    "Image analysis is temporarily unavailable due to an AI service issue. "
+                    "Please try again in a moment."
                 )
-            if self._last_plant_image_failure_reason == "invalid_image":
-                return PlantImageAnalyzeResponse(
-                    status="not_detected",
-                    reply=(
-                        "I couldn't read that image format clearly. "
-                        "Please send another photo with better lighting and a closer view of the plant."
-                    ),
-                    decision_required=False,
+            elif self._last_plant_image_failure_reason == "invalid_image":
+                reply = (
+                    "I couldn't read that image format clearly. "
+                    "Please send another photo with better lighting and a closer view of the plant."
                 )
+            else:
+                reply = "I couldn't clearly detect a plant from this image yet. Please try another photo with better lighting and a closer view of the plant."
+
+            if thread_id:
+                user_text = message.strip() if message else ""
+                if not user_text:
+                    user_text = "Uploaded a plant image."
+                else:
+                    user_text = f"{user_text} [Uploaded a plant image.]"
+                self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
+
             return PlantImageAnalyzeResponse(
                 status="not_detected",
-                reply="I couldn't clearly detect a plant from this image yet. Please try another photo with better lighting and a closer view of the plant.",
+                reply=reply,
                 decision_required=False,
             )
 
         try:
             image_path = _save_base64_image(image_base64, user_id)
         except ValueError:
+            reply = "Invalid image format. Please try another photo."
+            if thread_id:
+                user_text = message.strip() if message else ""
+                if not user_text:
+                    user_text = "Uploaded a plant image."
+                else:
+                    user_text = f"{user_text} [Uploaded a plant image.]"
+                self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
             return PlantImageAnalyzeResponse(
                 status="not_detected",
-                reply="Invalid image format. Please try another photo.",
+                reply=reply,
                 decision_required=False,
             )
 
@@ -391,12 +673,36 @@ class LangGraphChatAgent:
                 self._proposal_owner_by_id[proposal_id] = user_id
                 self._pending_proposal_by_owner[user_id] = proposal_id
 
+        reply = (
+            "I detected a plant and prepared the information below. "
+            "Please review and let me know if I can use this information or if you want to edit it."
+        )
+
+        if thread_id:
+            user_text = message.strip() if message else ""
+            if not user_text:
+                user_text = "Uploaded a plant image."
+            else:
+                user_text = f"{user_text} [Uploaded a plant image.]"
+            
+            desc_parts = []
+            desc_parts.append(f"I detected a plant: {detected.plant_name} ({detected.species}).")
+            if detected.note:
+                desc_parts.append(f"Care Note: {detected.note}.")
+            if detected.overview:
+                desc_parts.append(f"Overview: {detected.overview}")
+            if detected.water:
+                desc_parts.append(f"Watering: {detected.water}")
+            if detected.sunlight:
+                desc_parts.append(f"Sunlight: {detected.sunlight}")
+            desc_parts.append(reply)
+            
+            assistant_graph_text = " ".join(desc_parts)
+            self._save_both_histories(db, user_id, thread_id, user_text, reply, assistant_graph_text)
+
         return PlantImageAnalyzeResponse(
             status="detected",
-            reply=(
-                "I detected a plant and prepared the information below. "
-                "Please review and let me know if I can use this information or if you want to edit it."
-            ),
+            reply=reply,
             proposal_id=proposal_id,
             data=PlantDetectionData(
                 plant_name=detected.plant_name,
@@ -423,6 +729,63 @@ class LangGraphChatAgent:
         )
 
     def apply_plant_decision(
+        self,
+        proposal_id: str,
+        decision: str,
+        edited_data: PlantDetectionData | None,
+        user_id: str,
+        db: Session,
+        thread_id: str | None = None,
+    ) -> PlantDecisionResponse:
+        plant_name = "Unknown Plant"
+        species = "Unknown Species"
+        with self._proposal_lock:
+            try:
+                current_db = (
+                    db.query(ChatPlantProposal)
+                    .filter(
+                        ChatPlantProposal.id == proposal_id,
+                        ChatPlantProposal.user_id == user_id,
+                        ChatPlantProposal.status == "pending",
+                    )
+                    .one_or_none()
+                )
+                if current_db is not None:
+                    plant_name = current_db.proposal_payload.get("plant_name", "Unknown Plant")
+                    species = current_db.proposal_payload.get("species", "Unknown Species")
+            except Exception:
+                pass
+            if plant_name == "Unknown Plant":
+                current_mem = self._proposal_store.get(proposal_id)
+                if current_mem is not None:
+                    plant_name = current_mem.plant_name
+                    species = current_mem.species
+
+        response = self._apply_plant_decision_internal(
+            proposal_id=proposal_id,
+            decision=decision,
+            edited_data=edited_data,
+            user_id=user_id,
+            db=db,
+        )
+
+        if thread_id and response.status != "invalid":
+            if decision == "accept":
+                user_text = f"I accept the proposal to add the plant: {plant_name} ({species})."
+            elif decision == "reject":
+                user_text = f"I reject the proposal to add the plant: {plant_name} ({species})."
+            elif decision == "edit":
+                user_text = f"I edited the proposal for the plant: {plant_name} ({species})."
+                if edited_data:
+                    user_text += f" New details: Name={edited_data.plant_name}, Species={edited_data.species}, Note={edited_data.note}."
+            else:
+                user_text = f"Decision made: {decision} on plant proposal."
+            
+            self._save_both_histories(db, user_id, thread_id, user_text, response.reply, response.reply)
+
+        return response
+
+    def _apply_plant_decision_internal(
         self,
         proposal_id: str,
         decision: str,
@@ -636,15 +999,35 @@ class LangGraphChatAgent:
             state = self._graph.invoke(Command(resume=message), config=config)
             return cast(Sequence[BaseMessage], state["messages"])
 
+        # Check if the thread already has messages in memory
+        try:
+            snapshot = self._graph.get_state(config)
+            has_history = bool(snapshot.values and snapshot.values.get("messages"))
+        except Exception:
+            has_history = False
+
         # New turn input for same thread_id (multi-turn chat), not a resume.
-        state = self._graph.invoke(
-            {
-                "messages": [
-                    HumanMessage(content=message),
-                ]
-            },
-            config=config,
-        )
+        if not has_history:
+            # First message on this thread: prepend SystemMessage instructions
+            state = self._graph.invoke(
+                {
+                    "messages": [
+                        SystemMessage(content=SYSTEM_PROMPT),
+                        HumanMessage(content=message),
+                    ]
+                },
+                config=config,
+            )
+        else:
+            # Subsequent messages: append only the human message
+            state = self._graph.invoke(
+                {
+                    "messages": [
+                        HumanMessage(content=message),
+                    ]
+                },
+                config=config,
+            )
         return state["messages"]
 
     def _thread_has_pending_interrupt(self, config: dict[str, dict[str, str]]) -> bool:

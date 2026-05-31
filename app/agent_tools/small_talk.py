@@ -8,10 +8,12 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 
+from typing import Annotated
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langgraph.prebuilt import InjectedState
+
 try:
     from langchain.chat_models import init_chat_model
-    from langchain_core.messages import HumanMessage, SystemMessage
-
     _LANGCHAIN_AVAILABLE = True
 except ModuleNotFoundError:
     _LANGCHAIN_AVAILABLE = False
@@ -42,18 +44,39 @@ def _get_small_talk_llm():
     )
 
 
-def _invoke_openrouter_small_talk(message: str) -> tuple[str | None, str | None]:
+def _invoke_openrouter_small_talk(
+    message: str,
+    history: list[BaseMessage] | None = None,
+) -> tuple[str | None, str | None]:
     if not settings.openrouter_api_key:
         return None, "OPENROUTER_API_KEY is missing."
+
+    openai_messages = []
+    openai_messages.append({"role": "system", "content": SMALL_TALK_SYSTEM_PROMPT})
+
+    if history:
+        for msg in history:
+            if isinstance(msg, SystemMessage):
+                continue
+            content = getattr(msg, "content", "")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            role = "user"
+            if msg.type == "assistant":
+                role = "assistant"
+            elif msg.type == "system":
+                continue
+            elif msg.type == "tool":
+                continue
+            openai_messages.append({"role": role, "content": content})
+    else:
+        openai_messages.append({"role": "user", "content": message})
 
     payload = {
         "model": settings.openrouter_model,
         "temperature": 0.3,
         "max_tokens": 80,
-        "messages": [
-            {"role": "system", "content": SMALL_TALK_SYSTEM_PROMPT},
-            {"role": "user", "content": message},
-        ],
+        "messages": openai_messages,
     }
     body = json.dumps(payload).encode("utf-8")
     req = request.Request(
@@ -94,20 +117,26 @@ def _invoke_openrouter_small_talk(message: str) -> tuple[str | None, str | None]
     return None, "OpenRouter returned empty content."
 
 
-def generate_small_talk_response(message: str) -> str:
+def generate_small_talk_response(message: str, history: list[BaseMessage] | None = None) -> str:
     llm = _get_small_talk_llm()
     if llm is not None:
-        response = llm.invoke(
-            [
+        if history:
+            filtered_history = [m for m in history if not isinstance(m, SystemMessage)]
+            messages_to_send = [SystemMessage(content=SMALL_TALK_SYSTEM_PROMPT)] + filtered_history
+        else:
+            messages_to_send = [
                 SystemMessage(content=SMALL_TALK_SYSTEM_PROMPT),
                 HumanMessage(content=message),
             ]
-        )
-        content = getattr(response, "content", "")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
+        try:
+            response = llm.invoke(messages_to_send)
+            content = getattr(response, "content", "")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+        except Exception:
+            pass
 
-    direct_response, err = _invoke_openrouter_small_talk(message)
+    direct_response, err = _invoke_openrouter_small_talk(message, history=history)
     if direct_response:
         return direct_response
 
@@ -117,6 +146,9 @@ def generate_small_talk_response(message: str) -> str:
 
 
 @tool("small_talk_tool")
-def small_talk_tool(message: str) -> str:
+def small_talk_tool(
+    message: str,
+    state_messages: Annotated[list[BaseMessage], InjectedState("messages")],
+) -> str:
     """Handle small-talk messages using the configured chat model."""
-    return generate_small_talk_response(message)
+    return generate_small_talk_response(message, history=state_messages)

@@ -56,6 +56,8 @@ class PlantDetectionData(BaseModel):
 
 class PlantImageAnalyzeRequest(BaseModel):
     image_base64: str = Field(min_length=20)
+    message: str | None = Field(default=None)
+    thread_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class PlantImageAnalyzeResponse(BaseModel):
@@ -71,6 +73,7 @@ class PlantDecisionRequest(BaseModel):
     proposal_id: str = Field(min_length=1)
     decision: Literal["accept", "reject", "edit"]
     edited_data: PlantDetectionData | None = None
+    thread_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class PlantDecisionResponse(BaseModel):

@@ -6,9 +6,8 @@ from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.v1.endpoints.common import bump_version, soft_delete
+from app.api.v1.endpoints.common import bump_version
 from app.core.config import settings
-from app.core.path_policy import normalize_image_path
 from app.db.session import get_db
 from app.dependencies.auth import get_current_user
 from app.models.user import User
@@ -142,6 +141,22 @@ def _get_entity_by_id(db: Session, model: Any, user_id: str, entity_id: str | No
     ).scalar_one_or_none()
 
 
+def _ensure_note_plant_owner(db: Session, payload: dict[str, Any], current_user: User) -> None:
+    plant_id = payload.get("plant_id")
+    if not plant_id:
+        return
+
+    plant = db.execute(
+        select(Plant).where(
+            Plant.id == plant_id,
+            Plant.user_id == current_user.id,
+            Plant.deleted_at.is_(None),
+        )
+    ).scalar_one_or_none()
+    if plant is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Plant not found")
+
+
 def _apply_profile_settings_mutation(
     db: Session,
     operation: str,
@@ -186,6 +201,8 @@ def _apply_generic_mutation(
     if item.operation == "create":
         create_schema = CREATE_SCHEMA_MAP[item.entity_type]
         data = create_schema.model_validate(item.payload).model_dump(exclude_unset=True)
+        if model is Note:
+            _ensure_note_plant_owner(db, data, current_user)
         entity = model(user_id=current_user.id, **data)
         if item.entity_id:
             entity.id = item.entity_id
@@ -199,6 +216,8 @@ def _apply_generic_mutation(
         if entity is None:
             create_schema = CREATE_SCHEMA_MAP[item.entity_type]
             data = create_schema.model_validate(item.payload).model_dump(exclude_unset=True)
+            if model is Note:
+                _ensure_note_plant_owner(db, data, current_user)
             entity = model(user_id=current_user.id, **data)
             if item.entity_id:
                 entity.id = item.entity_id

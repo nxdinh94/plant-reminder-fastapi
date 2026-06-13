@@ -145,6 +145,33 @@ def test_sync_push_pull_contract(client: TestClient) -> None:
     first_result = push_response.json()["results"][0]
     assert first_result["status"] == "applied"
 
+    note_push_response = client.post(
+        "/api/v1/sync/push",
+        json={
+            "operations": [
+                {
+                    "operation_id": "op-note-1",
+                    "entity_type": "notes",
+                    "operation": "upsert",
+                    "entity_id": None,
+                    "payload": {
+                        "plant_id": plant_id,
+                        "entry_date": "2026-06-13",
+                        "content": "New leaf unfurled",
+                        "tags": ["growth", "photo"],
+                        "image_paths": ["/uploads/note-1.jpg"],
+                    },
+                }
+            ]
+        },
+        headers=headers,
+    )
+    assert note_push_response.status_code == 200
+    note_result = note_push_response.json()["results"][0]
+    assert note_result["status"] == "applied"
+    note_id = note_result["entity_id"]
+    assert note_id is not None
+
     duplicate_response = client.post(
         "/api/v1/sync/push",
         json={
@@ -169,6 +196,21 @@ def test_sync_push_pull_contract(client: TestClient) -> None:
     payload = pull_after.json()
     assert "plants" in payload["changes"]
     assert any(item["id"] == plant_id for item in payload["changes"]["plants"])
+    assert "notes" in payload["changes"]
+    assert any(
+        item["id"] == note_id
+        and item["plant_id"] == plant_id
+        and item["entry_date"] == "2026-06-13"
+        and item["content"] == "New leaf unfurled"
+        and item["tags"] == ["growth", "photo"]
+        and item["image_paths"] == ["/uploads/note-1.jpg"]
+        for item in payload["changes"]["notes"]
+    )
+
+    other_headers = auth_headers(client, "sync-contracts-other@example.com")
+    other_pull = client.get("/api/v1/sync/pull", headers=other_headers)
+    assert other_pull.status_code == 200
+    assert not any(item["id"] == note_id for item in other_pull.json()["changes"]["notes"])
 
 
 def test_schedule_recurrence_and_completion_filters(client: TestClient) -> None:
@@ -289,10 +331,34 @@ def test_cross_user_resource_isolation(client: TestClient) -> None:
         headers=headers_user_b,
     )
     delete_other_user_plant = client.delete(f"/api/v1/plants/{plant_id}", headers=headers_user_b)
+    sync_other_user_note = client.post(
+        "/api/v1/sync/push",
+        json={
+            "operations": [
+                {
+                    "operation_id": "op-cross-user-note",
+                    "entity_type": "notes",
+                    "operation": "upsert",
+                    "payload": {
+                        "plant_id": plant_id,
+                        "entry_date": "2026-06-13",
+                        "content": "Should not attach to another user's plant",
+                        "tags": [],
+                        "image_paths": [],
+                    },
+                }
+            ]
+        },
+        headers=headers_user_b,
+    )
 
     assert get_other_user_plant.status_code == 404
     assert patch_other_user_plant.status_code == 404
     assert delete_other_user_plant.status_code == 404
+    assert sync_other_user_note.status_code == 200
+    sync_result = sync_other_user_note.json()["results"][0]
+    assert sync_result["status"] == "failed"
+    assert sync_result["error"] == "Plant not found"
 
 
 def test_client_cannot_override_user_id_in_payload(client: TestClient) -> None:

@@ -47,12 +47,22 @@ def _get_small_talk_llm():
 def _invoke_openrouter_small_talk(
     message: str,
     history: list[BaseMessage] | None = None,
+    language: str = "en",
 ) -> tuple[str | None, str | None]:
     if not settings.openrouter_api_key:
         return None, "OPENROUTER_API_KEY is missing."
 
+    if history:
+        for msg in history:
+            if isinstance(msg, SystemMessage) and "Vietnamese" in msg.content:
+                language = "vi"
+                break
+
     openai_messages = []
-    openai_messages.append({"role": "system", "content": SMALL_TALK_SYSTEM_PROMPT})
+    system_prompt = SMALL_TALK_SYSTEM_PROMPT + (
+        "\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language."
+    )
+    openai_messages.append({"role": "system", "content": system_prompt})
 
     if history:
         for msg in history:
@@ -117,15 +127,29 @@ def _invoke_openrouter_small_talk(
     return None, "OpenRouter returned empty content."
 
 
-def generate_small_talk_response(message: str, history: list[BaseMessage] | None = None) -> str:
+def generate_small_talk_response(
+    message: str,
+    history: list[BaseMessage] | None = None,
+    language: str = "en",
+) -> str:
+    if history:
+        for msg in history:
+            if isinstance(msg, SystemMessage) and "Vietnamese" in msg.content:
+                language = "vi"
+                break
+
+    system_prompt = SMALL_TALK_SYSTEM_PROMPT + (
+        "\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language."
+    )
+
     llm = _get_small_talk_llm()
     if llm is not None:
         if history:
             filtered_history = [m for m in history if not isinstance(m, SystemMessage)]
-            messages_to_send = [SystemMessage(content=SMALL_TALK_SYSTEM_PROMPT)] + filtered_history
+            messages_to_send = [SystemMessage(content=system_prompt)] + filtered_history
         else:
             messages_to_send = [
-                SystemMessage(content=SMALL_TALK_SYSTEM_PROMPT),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=message),
             ]
         try:
@@ -136,7 +160,7 @@ def generate_small_talk_response(message: str, history: list[BaseMessage] | None
         except Exception:
             pass
 
-    direct_response, err = _invoke_openrouter_small_talk(message, history=history)
+    direct_response, err = _invoke_openrouter_small_talk(message, history=history, language=language)
     if direct_response:
         return direct_response
 

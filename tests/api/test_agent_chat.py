@@ -125,7 +125,7 @@ def test_agent_chat_with_image_updates_langgraph_state(client: TestClient) -> No
         assert config["configurable"]["thread_id"] == "test_image_thread"
         messages = values["messages"]
         assert len(messages) == 3
-        assert messages[0].content == SYSTEM_PROMPT
+        assert messages[0].content.startswith(SYSTEM_PROMPT)
         assert "tell me about this plant" in messages[1].content
         assert "[Uploaded a plant image.]" in messages[1].content
 

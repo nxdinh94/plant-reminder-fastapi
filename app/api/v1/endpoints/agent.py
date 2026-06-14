@@ -91,11 +91,15 @@ def chat_with_agent(
             db.rollback()
             logger.exception("chat history persistence failed for user message; continuing without persistence")
 
+        accept_language = request.headers.get("accept-language", "en")
+        language = "vi" if "vi" in accept_language.lower() else "en"
+
         response = agent.chat(
             payload.message,
             image_base64=payload.image_base64,
             thread_id=thread_id,
             resume_interrupt=payload.resume_interrupt,
+            language=language,
         )
         response.thread_id = thread_id
 
@@ -195,6 +199,9 @@ def analyze_plant_image(
             len(payload.image_base64),
             preview,
         )
+        accept_language = request.headers.get("accept-language", "en")
+        language = "vi" if "vi" in accept_language.lower() else "en"
+
         result = agent.analyze_plant_image(
             payload.image_base64,
             user_id=user_id,
@@ -202,6 +209,7 @@ def analyze_plant_image(
             message=payload.message,
             thread_id=payload.thread_id,
             is_manual_creation=payload.is_manual_creation,
+            language=language,
         )
         logger.info("Plant image analyze response body: %s", result.model_dump_json())
         return result
@@ -223,6 +231,9 @@ def apply_plant_decision(
     current_user: User = Depends(get_current_user),
 ) -> PlantDecisionResponse:
     try:
+        accept_language = request.headers.get("accept-language", "en")
+        language = "vi" if "vi" in accept_language.lower() else "en"
+
         decision = agent.apply_plant_decision(
             payload.proposal_id,
             payload.decision,
@@ -230,6 +241,7 @@ def apply_plant_decision(
             user_id=str(current_user.id),
             db=db,
             thread_id=payload.thread_id,
+            language=language,
         )
         if decision.status != "accepted" or decision.data is None:
             return decision

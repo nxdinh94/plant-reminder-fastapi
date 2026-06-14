@@ -22,7 +22,8 @@ try:
     from langchain_core.tools import tool
     from langgraph.checkpoint.postgres import PostgresSaver
     from langgraph.graph import END, START, MessagesState, StateGraph
-    from langgraph.prebuilt import ToolNode
+    from langgraph.prebuilt import ToolNode, InjectedState
+    from typing import Annotated
     from langgraph.types import Command
     from psycopg_pool import ConnectionPool
     from psycopg.rows import dict_row
@@ -175,9 +176,21 @@ class LangGraphChatAgent:
 
     def _build_graph(self) -> Any:
         @tool("plant_image_detect_tool")
-        def plant_image_detect_tool(image_base64: str) -> str:
+        def plant_image_detect_tool(
+            image_base64: str,
+            state_messages: Annotated[list[BaseMessage], InjectedState("messages")] | None = None,
+        ) -> str:
             """Detect plant information from a base64 image payload and return JSON result."""
-            detected = self._detect_plant(image_base64)
+            language = "en"
+            if state_messages:
+                for msg in state_messages:
+                    if isinstance(msg, SystemMessage) and "Vietnamese" in msg.content:
+                        language = "vi"
+                        break
+            try:
+                detected = self._detect_plant(image_base64, language=language)
+            except TypeError:
+                detected = self._detect_plant(image_base64)
             if detected is None:
                 return json.dumps({"status": "not_detected"})
             return json.dumps(
@@ -264,15 +277,20 @@ class LangGraphChatAgent:
             logger.exception("Failed to classify user intent; defaulting to CREATE")
             return "CREATE"
 
-    def _answer_question_with_image(self, message: str, image_base64: str) -> str:
+    def _answer_question_with_image(self, message: str, image_base64: str, language: str = "vi") -> str:
         """Answer the user's question using the plant image."""
         data_url = self._normalize_to_data_url(image_base64)
         if data_url is None:
-            return "I couldn't read the image. Please upload a clear photo of the plant."
+            return (
+                "I couldn't read the image. Please upload a clear photo of the plant."
+                if language != "vi" else
+                "Tôi không thể đọc được hình ảnh. Vui lòng tải lên một bức ảnh rõ ràng của cây."
+            )
 
         prompt = (
             f"The user has uploaded a plant image and asked: \"{message}\"\n"
-            "Please analyze the image and answer their question directly, clearly, and concisely."
+            "Please analyze the image and answer their question directly, clearly, and concisely. "
+            f"Your response MUST be in {'Vietnamese' if language == 'vi' else 'English'}."
         )
         try:
             if _LANGCHAIN_AVAILABLE and self._vision_llm is not None:
@@ -312,11 +330,15 @@ class LangGraphChatAgent:
         image_base64: str | None = None,
         thread_id: str | None = None,
         resume_interrupt: bool = False,
+        language: str = "vi",
     ) -> AgentChatResponse:
         if image_base64:
             intent = self._classify_intent(message) if message else "CREATE"
             if intent == "QUESTION":
-                reply_content = self._answer_question_with_image(message, image_base64)
+                try:
+                    reply_content = self._answer_question_with_image(message, image_base64, language=language)
+                except TypeError:
+                    reply_content = self._answer_question_with_image(message, image_base64)
                 if thread_id and self._graph is not None and _LANGCHAIN_AVAILABLE:
                     config = {"configurable": {"thread_id": thread_id}}
                     try:
@@ -327,7 +349,10 @@ class LangGraphChatAgent:
 
                     new_messages = []
                     if not has_history:
-                        new_messages.append(SystemMessage(content=SYSTEM_PROMPT))
+                        sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
+                        new_messages.append(SystemMessage(content=sys_prompt))
+                    else:
+                        new_messages.append(SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."))
                     
                     user_content = message.strip() if message else ""
                     if not user_content:
@@ -348,7 +373,10 @@ class LangGraphChatAgent:
                     tool_calls=[],
                 )
 
-            detected = self._detect_plant(image_base64)
+            try:
+                detected = self._detect_plant(image_base64, language=language)
+            except TypeError:
+                detected = self._detect_plant(image_base64)
             if detected is None:
                 payload = {
                     "is_plant": False,
@@ -376,7 +404,10 @@ class LangGraphChatAgent:
 
                 new_messages = []
                 if not has_history:
-                    new_messages.append(SystemMessage(content=SYSTEM_PROMPT))
+                    sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
+                    new_messages.append(SystemMessage(content=sys_prompt))
+                else:
+                    new_messages.append(SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."))
                 
                 user_content = message.strip() if message else ""
                 if not user_content:
@@ -412,6 +443,7 @@ class LangGraphChatAgent:
             message,
             thread_id=thread_id,
             resume_interrupt=resume_interrupt,
+            language=language,
         )
         reply = self._extract_final_reply(response_messages)
         tool_calls = self._extract_tool_calls(response_messages)
@@ -425,6 +457,7 @@ class LangGraphChatAgent:
         user_message: str,
         assistant_sql_message: str,
         assistant_graph_message: str,
+        language: str = "vi",
     ) -> None:
         from app.models.chat_message import ChatMessage
         from datetime import datetime, timezone, timedelta
@@ -462,7 +495,10 @@ class LangGraphChatAgent:
 
             new_messages = []
             if not has_history:
-                new_messages.append(SystemMessage(content=SYSTEM_PROMPT))
+                sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
+                new_messages.append(SystemMessage(content=sys_prompt))
+            else:
+                new_messages.append(SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."))
             new_messages.append(HumanMessage(content=user_message))
             new_messages.append(AIMessage(content=assistant_graph_message))
 
@@ -479,18 +515,22 @@ class LangGraphChatAgent:
         message: str | None = None,
         thread_id: str | None = None,
         is_manual_creation: bool = False,
+        language: str = "vi",
     ) -> PlantImageAnalyzeResponse:
         if message and not is_manual_creation:
             intent = self._classify_intent(message)
             if intent == "QUESTION":
-                reply = self._answer_question_with_image(message, image_base64)
+                try:
+                    reply = self._answer_question_with_image(message, image_base64, language=language)
+                except TypeError:
+                    reply = self._answer_question_with_image(message, image_base64)
                 if thread_id:
                     user_text = message.strip()
                     if not user_text:
                         user_text = "Uploaded a plant image."
                     else:
                         user_text = f"{user_text} [Uploaded a plant image.]"
-                    self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
+                    self._save_both_histories(db, user_id, thread_id, user_text, reply, reply, language=language)
                 return PlantImageAnalyzeResponse(
                     status="detected",
                     reply=reply,
@@ -516,6 +556,9 @@ class LangGraphChatAgent:
                         reply = (
                             "A decision is still pending for your previous image. "
                             "Please accept, reject, or edit that result before sending another image."
+                            if language != "vi" else
+                            "Một quyết định vẫn đang chờ xử lý cho hình ảnh trước đó của bạn. "
+                            "Vui lòng chấp nhận, từ chối hoặc chỉnh sửa kết quả đó trước khi gửi hình ảnh khác."
                         )
                         if thread_id:
                             user_text = message.strip() if message else ""
@@ -523,7 +566,7 @@ class LangGraphChatAgent:
                                 user_text = "Uploaded a plant image."
                             else:
                                 user_text = f"{user_text} [Uploaded a plant image.]"
-                            self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
+                            self._save_both_histories(db, user_id, thread_id, user_text, reply, reply, language=language)
                         return PlantImageAnalyzeResponse(
                             status="detected",
                             reply=reply,
@@ -552,6 +595,9 @@ class LangGraphChatAgent:
                             reply = (
                                 "A decision is still pending for your previous image. "
                                 "Please accept, reject, or edit that result before sending another image."
+                                if language != "vi" else
+                                "Một quyết định vẫn đang chờ xử lý cho hình ảnh trước đó của bạn. "
+                                "Vui lòng chấp nhận, từ chối hoặc chỉnh sửa kết quả đó trước khi gửi hình ảnh khác."
                             )
                             if thread_id:
                                 user_text = message.strip() if message else ""
@@ -559,7 +605,7 @@ class LangGraphChatAgent:
                                     user_text = "Uploaded a plant image."
                                 else:
                                     user_text = f"{user_text} [Uploaded a plant image.]"
-                                self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
+                                self._save_both_histories(db, user_id, thread_id, user_text, reply, reply, language=language)
                             return PlantImageAnalyzeResponse(
                                 status="detected",
                                 reply=reply,
@@ -569,20 +615,31 @@ class LangGraphChatAgent:
                                 decision_options=["accept", "reject", "edit"],
                             )
 
-        detected = self._detect_plant(image_base64)
+        try:
+            detected = self._detect_plant(image_base64, language=language)
+        except TypeError:
+            detected = self._detect_plant(image_base64)
         if detected is None:
             if self._last_plant_image_failure_reason == "provider_error":
                 reply = (
                     "Image analysis is temporarily unavailable due to an AI service issue. "
                     "Please try again in a moment."
+                    if language != "vi" else
+                    "Phân tích hình ảnh tạm thời không khả dụng do sự cố dịch vụ AI. Vui lòng thử lại sau giây lát."
                 )
             elif self._last_plant_image_failure_reason == "invalid_image":
                 reply = (
                     "I couldn't read that image format clearly. "
                     "Please send another photo with better lighting and a closer view of the plant."
+                    if language != "vi" else
+                    "Tôi không thể đọc rõ định dạng hình ảnh đó. Vui lòng gửi một bức ảnh khác có ánh sáng tốt hơn và góc nhìn cận cảnh hơn."
                 )
             else:
-                reply = "I couldn't clearly detect a plant from this image yet. Please try another photo with better lighting and a closer view of the plant."
+                reply = (
+                    "I couldn't clearly detect a plant from this image yet. Please try another photo with better lighting and a closer view of the plant."
+                    if language != "vi" else
+                    "Tôi chưa thể phát hiện rõ ràng một loại cây nào từ hình ảnh này. Vui lòng thử một bức ảnh khác có ánh sáng tốt hơn và góc nhìn cận cảnh hơn."
+                )
 
             if thread_id:
                 user_text = message.strip() if message else ""
@@ -590,7 +647,7 @@ class LangGraphChatAgent:
                     user_text = "Uploaded a plant image."
                 else:
                     user_text = f"{user_text} [Uploaded a plant image.]"
-                self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
+                self._save_both_histories(db, user_id, thread_id, user_text, reply, reply, language=language)
 
             return PlantImageAnalyzeResponse(
                 status="not_detected",
@@ -601,14 +658,18 @@ class LangGraphChatAgent:
         try:
             image_path = _save_base64_image(image_base64, user_id)
         except ValueError:
-            reply = "Invalid image format. Please try another photo."
+            reply = (
+                "Invalid image format. Please try another photo."
+                if language != "vi" else
+                "Định dạng hình ảnh không hợp lệ. Vui lòng thử một bức ảnh khác."
+            )
             if thread_id:
                 user_text = message.strip() if message else ""
                 if not user_text:
                     user_text = "Uploaded a plant image."
                 else:
                     user_text = f"{user_text} [Uploaded a plant image.]"
-                self._save_both_histories(db, user_id, thread_id, user_text, reply, reply)
+                self._save_both_histories(db, user_id, thread_id, user_text, reply, reply, language=language)
             return PlantImageAnalyzeResponse(
                 status="not_detected",
                 reply=reply,
@@ -616,7 +677,11 @@ class LangGraphChatAgent:
             )
 
         if is_manual_creation:
-            reply = "I detected a plant and prepared the information below."
+            reply = (
+                "I detected a plant and prepared the information below."
+                if language != "vi" else
+                "Tôi đã phát hiện ra một cây trồng và chuẩn bị thông tin bên dưới."
+            )
             return PlantImageAnalyzeResponse(
                 status="detected",
                 reply=reply,
@@ -708,6 +773,9 @@ class LangGraphChatAgent:
         reply = (
             "I detected a plant and prepared the information below. "
             "Please review and let me know if I can use this information or if you want to edit it."
+            if language != "vi" else
+            "Tôi đã phát hiện ra một loại cây và chuẩn bị thông tin bên dưới. "
+            "Vui lòng xem lại và cho tôi biết nếu tôi có thể sử dụng thông tin này hoặc nếu bạn muốn chỉnh sửa nó."
         )
 
         if thread_id:
@@ -718,19 +786,30 @@ class LangGraphChatAgent:
                 user_text = f"{user_text} [Uploaded a plant image.]"
             
             desc_parts = []
-            desc_parts.append(f"I detected a plant: {detected.plant_name} ({detected.species}).")
-            if detected.note:
-                desc_parts.append(f"Care Note: {detected.note}.")
-            if detected.overview:
-                desc_parts.append(f"Overview: {detected.overview}")
-            if detected.water:
-                desc_parts.append(f"Watering: {detected.water}")
-            if detected.sunlight:
-                desc_parts.append(f"Sunlight: {detected.sunlight}")
+            if language == "vi":
+                desc_parts.append(f"Tôi đã phát hiện ra một loại cây: {detected.plant_name} ({detected.species}).")
+                if detected.note:
+                    desc_parts.append(f"Ghi chú chăm sóc: {detected.note}.")
+                if detected.overview:
+                    desc_parts.append(f"Tổng quan: {detected.overview}")
+                if detected.water:
+                    desc_parts.append(f"Tưới nước: {detected.water}")
+                if detected.sunlight:
+                    desc_parts.append(f"Ánh sáng: {detected.sunlight}")
+            else:
+                desc_parts.append(f"I detected a plant: {detected.plant_name} ({detected.species}).")
+                if detected.note:
+                    desc_parts.append(f"Care Note: {detected.note}.")
+                if detected.overview:
+                    desc_parts.append(f"Overview: {detected.overview}")
+                if detected.water:
+                    desc_parts.append(f"Watering: {detected.water}")
+                if detected.sunlight:
+                    desc_parts.append(f"Sunlight: {detected.sunlight}")
             desc_parts.append(reply)
             
             assistant_graph_text = " ".join(desc_parts)
-            self._save_both_histories(db, user_id, thread_id, user_text, reply, assistant_graph_text)
+            self._save_both_histories(db, user_id, thread_id, user_text, reply, assistant_graph_text, language=language)
 
         return PlantImageAnalyzeResponse(
             status="detected",
@@ -768,6 +847,7 @@ class LangGraphChatAgent:
         user_id: str,
         db: Session,
         thread_id: str | None = None,
+        language: str = "vi",
     ) -> PlantDecisionResponse:
         plant_name = "Unknown Plant"
         species = "Unknown Species"
@@ -799,21 +879,42 @@ class LangGraphChatAgent:
             edited_data=edited_data,
             user_id=user_id,
             db=db,
+            language=language,
         )
 
         if thread_id and response.status != "invalid":
             if decision == "accept":
-                user_text = f"I accept the proposal to add the plant: {plant_name} ({species})."
+                user_text = (
+                    f"I accept the proposal to add the plant: {plant_name} ({species})."
+                    if language != "vi" else
+                    f"Tôi chấp nhận đề xuất thêm cây: {plant_name} ({species})."
+                )
             elif decision == "reject":
-                user_text = f"I reject the proposal to add the plant: {plant_name} ({species})."
+                user_text = (
+                    f"I reject the proposal to add the plant: {plant_name} ({species})."
+                    if language != "vi" else
+                    f"Tôi từ chối đề xuất thêm cây: {plant_name} ({species})."
+                )
             elif decision == "edit":
-                user_text = f"I edited the proposal for the plant: {plant_name} ({species})."
+                user_text = (
+                    f"I edited the proposal for the plant: {plant_name} ({species})."
+                    if language != "vi" else
+                    f"Tôi đã chỉnh sửa đề xuất cho cây: {plant_name} ({species})."
+                )
                 if edited_data:
-                    user_text += f" New details: Name={edited_data.plant_name}, Species={edited_data.species}, Note={edited_data.note}."
+                    user_text += (
+                        f" New details: Name={edited_data.plant_name}, Species={edited_data.species}, Note={edited_data.note}."
+                        if language != "vi" else
+                        f" Chi tiết mới: Tên={edited_data.plant_name}, Loài={edited_data.species}, Ghi chú={edited_data.note}."
+                    )
             else:
-                user_text = f"Decision made: {decision} on plant proposal."
+                user_text = (
+                    f"Decision made: {decision} on plant proposal."
+                    if language != "vi" else
+                    f"Đã đưa ra quyết định: {decision} trên đề xuất cây."
+                )
             
-            self._save_both_histories(db, user_id, thread_id, user_text, response.reply, response.reply)
+            self._save_both_histories(db, user_id, thread_id, user_text, response.reply, response.reply, language=language)
 
         return response
 
@@ -824,6 +925,7 @@ class LangGraphChatAgent:
         edited_data: PlantDetectionData | None,
         user_id: str,
         db: Session,
+        language: str = "vi",
     ) -> PlantDecisionResponse:
         with self._proposal_lock:
             try:
@@ -839,7 +941,11 @@ class LangGraphChatAgent:
                 if current is None:
                     return PlantDecisionResponse(
                         status="invalid",
-                        reply="This decision request is no longer valid. Please send the image again.",
+                        reply=(
+                            "This decision request is no longer valid. Please send the image again."
+                            if language != "vi" else
+                            "Yêu cầu quyết định này không còn hiệu lực. Vui lòng gửi lại hình ảnh."
+                        ),
                     )
                 payload = current.proposal_payload
                 if decision == "accept":
@@ -867,7 +973,11 @@ class LangGraphChatAgent:
                     db.commit()
                     return PlantDecisionResponse(
                         status="accepted",
-                        reply="Accepted. I will use this plant information.",
+                        reply=(
+                            "Accepted. I will use this plant information."
+                            if language != "vi" else
+                            "Đã chấp nhận. Tôi sẽ sử dụng thông tin cây này."
+                        ),
                         data=accepted_data,
                     )
 
@@ -876,14 +986,22 @@ class LangGraphChatAgent:
                     db.commit()
                     return PlantDecisionResponse(
                         status="rejected",
-                        reply="Understood. I discarded this detected result.",
+                        reply=(
+                            "Understood. I discarded this detected result."
+                            if language != "vi" else
+                            "Đã hiểu. Tôi đã loại bỏ kết quả phát hiện này."
+                        ),
                     )
 
                 if decision == "edit":
                     if edited_data is None:
                         return PlantDecisionResponse(
                             status="invalid",
-                            reply="Please include edited_data when decision is edit.",
+                            reply=(
+                                "Please include edited_data when decision is edit."
+                                if language != "vi" else
+                                "Vui lòng bao gồm edited_data khi quyết định là chỉnh sửa."
+                            ),
                         )
                     current.proposal_payload = {
                         **payload,
@@ -909,7 +1027,11 @@ class LangGraphChatAgent:
                     db.commit()
                     return PlantDecisionResponse(
                         status="edited",
-                        reply="Updated. I will use your edited plant information.",
+                        reply=(
+                            "Updated. I will use your edited plant information."
+                            if language != "vi" else
+                            "Đã cập nhật. Tôi sẽ sử dụng thông tin cây đã chỉnh sửa của bạn."
+                        ),
                         data=edited_data,
                     )
             except ProgrammingError:
@@ -919,7 +1041,11 @@ class LangGraphChatAgent:
                 if current is None or owner_id != user_id:
                     return PlantDecisionResponse(
                         status="invalid",
-                        reply="This decision request is no longer valid. Please send the image again.",
+                        reply=(
+                            "This decision request is no longer valid. Please send the image again."
+                            if language != "vi" else
+                            "Yêu cầu quyết định này không còn hiệu lực. Vui lòng gửi lại hình ảnh."
+                        ),
                     )
                 if decision == "accept":
                     accepted_data = self._proposal_store.pop(proposal_id)
@@ -947,7 +1073,11 @@ class LangGraphChatAgent:
                     )
                     return PlantDecisionResponse(
                         status="accepted",
-                        reply="Accepted. I will use this plant information.",
+                        reply=(
+                            "Accepted. I will use this plant information."
+                            if language != "vi" else
+                            "Đã chấp nhận. Tôi sẽ sử dụng thông tin cây này."
+                        ),
                         data=accepted_data_with_url,
                     )
                 if decision == "reject":
@@ -956,26 +1086,42 @@ class LangGraphChatAgent:
                     self._pending_proposal_by_owner.pop(user_id, None)
                     return PlantDecisionResponse(
                         status="rejected",
-                        reply="Understood. I discarded this detected result.",
+                        reply=(
+                            "Understood. I discarded this detected result."
+                            if language != "vi" else
+                            "Đã hiểu. Tôi đã loại bỏ kết quả phát hiện này."
+                        ),
                     )
                 if decision == "edit":
                     if edited_data is None:
                         return PlantDecisionResponse(
                             status="invalid",
-                            reply="Please include edited_data when decision is edit.",
+                            reply=(
+                                "Please include edited_data when decision is edit."
+                                if language != "vi" else
+                                "Vui lòng bao gồm edited_data khi quyết định là chỉnh sửa."
+                            ),
                         )
                     self._proposal_store.pop(proposal_id, None)
                     self._proposal_owner_by_id.pop(proposal_id, None)
                     self._pending_proposal_by_owner.pop(user_id, None)
                     return PlantDecisionResponse(
                         status="edited",
-                        reply="Updated. I will use your edited plant information.",
+                        reply=(
+                            "Updated. I will use your edited plant information."
+                            if language != "vi" else
+                            "Đã cập nhật. Tôi sẽ sử dụng thông tin cây đã chỉnh sửa của bạn."
+                        ),
                         data=edited_data,
                     )
 
         return PlantDecisionResponse(
             status="invalid",
-            reply="Unsupported decision.",
+            reply=(
+                "Unsupported decision."
+                if language != "vi" else
+                "Quyết định không được hỗ trợ."
+            ),
         )
 
     async def chat_stream(self, message: str) -> AsyncIterator[str]:
@@ -1005,16 +1151,18 @@ class LangGraphChatAgent:
         message: str,
         thread_id: str | None = None,
         resume_interrupt: bool = False,
+        language: str = "vi",
     ) -> Sequence[BaseMessage]:
         if self._graph is None:
             return [AIMessage(content=generate_small_talk_response(message))]
 
         state: dict[str, Any]
+        sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
         if thread_id is None:
             state = self._graph.invoke(
                 {
                     "messages": [
-                        SystemMessage(content=SYSTEM_PROMPT),
+                        SystemMessage(content=sys_prompt),
                         HumanMessage(content=message),
                     ]
                 }
@@ -1044,18 +1192,19 @@ class LangGraphChatAgent:
             state = self._graph.invoke(
                 {
                     "messages": [
-                        SystemMessage(content=SYSTEM_PROMPT),
+                        SystemMessage(content=sys_prompt),
                         HumanMessage(content=message),
                     ]
                 },
                 config=config,
             )
         else:
-            # Subsequent messages: append only the human message
+            # Subsequent messages: append the human message and instruct language
             state = self._graph.invoke(
                 {
                     "messages": [
                         HumanMessage(content=message),
+                        SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."),
                     ]
                 },
                 config=config,
@@ -1114,7 +1263,7 @@ class LangGraphChatAgent:
     def _sse(event: str, data: str) -> str:
         return f"event: {event}\ndata: {data}\n\n"
 
-    def _detect_plant(self, image_base64: str) -> PlantDetectionData | None:
+    def _detect_plant(self, image_base64: str, language: str = "vi") -> PlantDetectionData | None:
         self._last_plant_image_failure_reason = None
         if not self._vision_enabled:
             logger.warning(
@@ -1151,7 +1300,8 @@ class LangGraphChatAgent:
             "}. "
             "If no plant is present or uncertain, return: "
             "{\"not_detected\": true, \"description\":\"...\"}. "
-            "Do not include markdown. Use cautious language like 'typically' or 'commonly' when uncertain."
+            "Do not include markdown. Use cautious language like 'typically' or 'commonly' when uncertain. "
+            f"All text values in the JSON (except the keys, which must remain exactly as specified above) MUST be written in {'Vietnamese' if language == 'vi' else 'English'}."
         )
         raw = ""
         if self._vision_llm is not None:

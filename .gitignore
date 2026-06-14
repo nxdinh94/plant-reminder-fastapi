@@ -17,6 +17,6 @@ env/
 *.egg-info/
 dist/
 build/
-
+/uploads/
 # Local environment files
 .env

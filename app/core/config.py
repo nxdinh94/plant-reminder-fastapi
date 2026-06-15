@@ -48,6 +48,18 @@ class Settings(BaseSettings):
     openrouter_site_url: str | None = Field(default=None, alias="OPENROUTER_SITE_URL")
     openrouter_site_name: str | None = Field(default=None, alias="OPENROUTER_SITE_NAME")
     upload_dir: str = Field(default="uploads", alias="UPLOAD_DIR")
+    media_storage_backend: Literal["local", "r2"] = Field(
+        default="local",
+        alias="MEDIA_STORAGE_BACKEND",
+    )
+    r2_worker_upload_url: str | None = Field(default=None, alias="R2_WORKER_UPLOAD_URL")
+    r2_worker_shared_secret: str | None = Field(default=None, alias="R2_WORKER_SHARED_SECRET")
+    r2_account_id: str | None = Field(default=None, alias="R2_ACCOUNT_ID")
+    r2_access_key_id: str | None = Field(default=None, alias="R2_ACCESS_KEY_ID")
+    r2_secret_access_key: str | None = Field(default=None, alias="R2_SECRET_ACCESS_KEY")
+    r2_bucket_name: str | None = Field(default=None, alias="R2_BUCKET_NAME")
+    r2_public_base_url: str | None = Field(default=None, alias="R2_PUBLIC_BASE_URL")
+    r2_key_prefix: str = Field(default="", alias="R2_KEY_PREFIX")
 
     @property
     def upload_dir_path(self) -> Path:
@@ -77,6 +89,25 @@ class Settings(BaseSettings):
         if isinstance(value, str):
             return [v.strip() for v in value.split(",") if v.strip()]
         raise ValueError("OPENROUTER_VISION_MODELS must be a comma-separated string or list.")
+
+    @field_validator(
+        "openrouter_api_key",
+        "openrouter_site_url",
+        "openrouter_site_name",
+        "r2_worker_upload_url",
+        "r2_worker_shared_secret",
+        "r2_account_id",
+        "r2_access_key_id",
+        "r2_secret_access_key",
+        "r2_bucket_name",
+        "r2_public_base_url",
+        mode="before",
+    )
+    @classmethod
+    def empty_string_to_none(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 @lru_cache

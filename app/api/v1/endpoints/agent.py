@@ -250,6 +250,7 @@ def apply_plant_decision(
             user_id=current_user.id,
             name=decision.data.plant_name,
             species=decision.data.species,
+            image_path=decision.data.image_path or None,
             note=decision.data.note,
             overview=decision.data.overview,
             water=decision.data.water,

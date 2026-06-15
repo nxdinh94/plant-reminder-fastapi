@@ -10,6 +10,9 @@ from sqlalchemy.pool import StaticPool
 
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key")
+os.environ.setdefault("OPENROUTER_API_KEY", "")
+os.environ.setdefault("MEDIA_STORAGE_BACKEND", "local")
+os.environ.setdefault("R2_KEY_PREFIX", "")
 
 from app.db.session import get_db
 from app.main import app

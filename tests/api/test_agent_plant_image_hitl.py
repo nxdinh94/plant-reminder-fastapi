@@ -2,6 +2,8 @@ from fastapi.testclient import TestClient
 
 from app.schemas.chat import PlantDetectionData
 from app.services.agent_chat import agent
+import app.services.agent_chat as agent_chat_module
+from app.services.media_storage import StoredMedia
 from tests.api.test_agent_chat import register_and_auth_headers
 
 
@@ -40,6 +42,57 @@ def test_plant_image_detect_then_accept(client: TestClient) -> None:
         plants = client.get("/api/v1/plants", headers=headers)
         assert plants.status_code == 200
         assert any(item["name"] == "Peace Lily" for item in plants.json())
+    finally:
+        agent._detect_plant = original
+
+
+def test_plant_image_analyze_stores_and_accepts_r2_url(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    headers = register_and_auth_headers(client, "plant-r2-accept@example.com")
+    r2_url = "https://files.example.com/users/11111111-1111-4111-8111-111111111111/images/22222222-2222-4222-8222-222222222222.jpg"
+
+    original = agent._detect_plant
+    agent._detect_plant = lambda _img: PlantDetectionData(
+        plant_name="R2 Lily",
+        species="Spathiphyllum wallisii",
+        note="Keep in indirect light.",
+    )
+    monkeypatch.setattr(
+        agent_chat_module,
+        "store_image_bytes_sync",
+        lambda *_args, **_kwargs: StoredMedia(
+            path=r2_url,
+            file_id="22222222-2222-4222-8222-222222222222",
+            key="users/11111111-1111-4111-8111-111111111111/images/22222222-2222-4222-8222-222222222222.jpg",
+            content_type="image/jpeg",
+        ),
+    )
+
+    try:
+        analyze = client.post(
+            "/api/v1/agent/plant-image/analyze",
+            json={"image_base64": "dGVzdA==dGVzdA==dGVzdA==dGVzdA=="},
+            headers=headers,
+        )
+        assert analyze.status_code == 200
+        analyze_payload = analyze.json()
+        assert analyze_payload["data"]["image_path"] == r2_url
+
+        decision = client.post(
+            "/api/v1/agent/plant-image/decision",
+            json={"proposal_id": analyze_payload["proposal_id"], "decision": "accept"},
+            headers=headers,
+        )
+        assert decision.status_code == 200
+
+        plants = client.get("/api/v1/plants", headers=headers)
+        assert plants.status_code == 200
+        assert any(
+            item["name"] == "R2 Lily" and item["image_path"] == r2_url
+            for item in plants.json()
+        )
     finally:
         agent._detect_plant = original
 

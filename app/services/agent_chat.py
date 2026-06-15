@@ -36,6 +36,10 @@ from app.agent_tools.datetime_tool import datetime_tool, generate_datetime_respo
 from app.agent_tools.small_talk import generate_small_talk_response, small_talk_tool
 from app.core.config import settings
 from app.models.chat_plant_proposal import ChatPlantProposal
+from app.services.media_storage import (
+    MediaStorageValidationError,
+    store_image_bytes_sync,
+)
 from app.schemas.chat import (
     AgentChatResponse,
     AgentToolCall,
@@ -89,18 +93,38 @@ def _normalize_base64_payload(payload: str) -> str | None:
 
 def _save_base64_image(image_base64: str, user_id: str) -> str:
     cleaned = image_base64.strip()
-    if cleaned.startswith("data:"):
-        comma_idx = cleaned.index(",")
-        cleaned = cleaned[comma_idx + 1:]
+    content_type = "image/jpeg"
+    extension = ".jpg"
+    data_url_match = re.match(r"^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$", cleaned, re.DOTALL)
+    if data_url_match:
+        content_type = data_url_match.group(1).lower()
+        extension = _extension_for_image_content_type(content_type)
+        cleaned = data_url_match.group(2)
+    elif cleaned.startswith("data:"):
+        raise ValueError("Invalid base64 image payload")
+
     normalized_payload = _normalize_base64_payload(cleaned)
     if normalized_payload is None:
         raise ValueError("Invalid base64 image payload")
-    filename = f"{user_id}_{uuid.uuid4()}.jpg"
-    filepath = str(settings.upload_dir_path / filename)
-    os.makedirs(str(settings.upload_dir_path), exist_ok=True)
-    with open(filepath, "wb") as f:
-        f.write(base64.b64decode(normalized_payload))
-    return filepath
+    try:
+        stored = store_image_bytes_sync(
+            base64.b64decode(normalized_payload),
+            user_id=user_id,
+            original_filename=f"image{extension}",
+            supplied_content_type=content_type,
+        )
+    except MediaStorageValidationError as exc:
+        raise ValueError(exc.detail) from exc
+    return stored.path
+
+
+def _extension_for_image_content_type(content_type: str) -> str:
+    return {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+    }.get(content_type, ".jpg")
 
 
 def _path_to_url(image_path: str) -> str:

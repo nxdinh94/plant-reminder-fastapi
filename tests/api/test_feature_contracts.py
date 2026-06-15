@@ -2,6 +2,8 @@ from datetime import date
 
 from fastapi.testclient import TestClient
 
+from app.core.config import settings
+
 
 def auth_headers(client: TestClient, email: str) -> dict[str, str]:
     response = client.post(
@@ -384,3 +386,52 @@ def test_client_cannot_override_user_id_in_payload(client: TestClient) -> None:
     payload = create_response.json()
     assert payload["user_id"] == current_user_id
     assert payload["user_id"] != forced_user_id
+
+
+def test_image_paths_accept_configured_r2_urls_and_reject_other_remote_urls(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "r2_public_base_url", "https://files.example.com")
+    headers = auth_headers(client, "r2-paths@example.com")
+    r2_url = "https://files.example.com/users/11111111-1111-4111-8111-111111111111/images/22222222-2222-4222-8222-222222222222.jpg"
+
+    plant_response = client.post(
+        "/api/v1/plants",
+        json={
+            "name": "R2 Plant",
+            "species": "Epipremnum aureum",
+            "image_path": r2_url,
+            "is_paused": False,
+        },
+        headers=headers,
+    )
+    assert plant_response.status_code == 201
+    assert plant_response.json()["image_path"] == r2_url
+    plant_id = plant_response.json()["id"]
+
+    note_response = client.post(
+        "/api/v1/notes",
+        json={
+            "plant_id": plant_id,
+            "entry_date": "2026-06-15",
+            "content": "Uploaded to R2",
+            "tags": [],
+            "image_paths": [r2_url],
+        },
+        headers=headers,
+    )
+    assert note_response.status_code == 201
+    assert note_response.json()["image_paths"] == [r2_url]
+
+    bad_plant = client.post(
+        "/api/v1/plants",
+        json={
+            "name": "Bad Remote",
+            "species": "Unknown",
+            "image_path": "https://evil.example.com/image.jpg",
+            "is_paused": False,
+        },
+        headers=headers,
+    )
+    assert bad_plant.status_code == 422

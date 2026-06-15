@@ -1,6 +1,8 @@
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.path_policy import normalize_image_path
 
 
 class PlantCreate(BaseModel):
@@ -25,6 +27,13 @@ class PlantCreate(BaseModel):
     toxicity: str | None = None
     propagation: str | None = None
 
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_image_path(value)
+
 
 class PlantUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -47,6 +56,13 @@ class PlantUpdate(BaseModel):
     pests_and_diseases: str | None = None
     toxicity: str | None = None
     propagation: str | None = None
+
+    @field_validator("image_path")
+    @classmethod
+    def validate_image_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_image_path(value)
 
 
 class PlantResponse(BaseModel):

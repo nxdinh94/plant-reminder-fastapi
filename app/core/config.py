@@ -61,6 +61,25 @@ class Settings(BaseSettings):
     r2_public_base_url: str | None = Field(default=None, alias="R2_PUBLIC_BASE_URL")
     r2_key_prefix: str = Field(default="", alias="R2_KEY_PREFIX")
 
+    # RevenueCat Settings
+    REVENUECAT_WEBHOOK_AUTH_HEADER: str = Field(
+        default="test-webhook-auth-header-secret",
+        alias="REVENUECAT_WEBHOOK_AUTH_HEADER",
+    )
+    REVENUECAT_REST_API_KEY: str = Field(
+        default="test-rest-api-key-secret",
+        alias="REVENUECAT_REST_API_KEY",
+    )
+    REVENUECAT_API_BASE_URL: str = Field(
+        default="https://api.revenuecat.com/v1",
+        alias="REVENUECAT_API_BASE_URL",
+    )
+    REVENUECAT_PRO_ENTITLEMENT_ID: str = Field(
+        default="PlantReminder Pro",
+        alias="REVENUECAT_PRO_ENTITLEMENT_ID",
+    )
+
+
     @property
     def upload_dir_path(self) -> Path:
         path = Path(self.upload_dir)

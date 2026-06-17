@@ -1,3 +1,4 @@
+from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field
 
 
@@ -25,3 +26,6 @@ class AuthSessionResponse(BaseModel):
     id: str
     email: EmailStr
     is_active: bool
+    plan_tier: str
+    plan_expires_at: datetime | None = None
+

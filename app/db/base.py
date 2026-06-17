@@ -9,6 +9,7 @@ from app.models.schedule import Schedule
 from app.models.sync_operation import SyncOperation
 from app.models.task_completion import TaskCompletion
 from app.models.user import User
+from app.models.revenuecat_webhook_event import RevenueCatWebhookEvent
 
 __all__ = [
     "ActionType",
@@ -23,4 +24,6 @@ __all__ = [
     "SyncOperation",
     "TaskCompletion",
     "User",
+    "RevenueCatWebhookEvent",
 ]
+

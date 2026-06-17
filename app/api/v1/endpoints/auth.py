@@ -78,4 +78,7 @@ def get_auth_session(current_user: User = Depends(get_current_user)) -> AuthSess
         id=current_user.id,
         email=current_user.email,
         is_active=current_user.is_active,
+        plan_tier=current_user.plan_tier,
+        plan_expires_at=current_user.plan_expires_at,
     )
+

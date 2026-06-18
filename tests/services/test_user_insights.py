@@ -1,0 +1,274 @@
+from datetime import date, datetime, time, timezone
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from app.agent_tools.user_insights import (
+    get_user_plant_insight_payload,
+    reset_user_insight_context,
+    set_user_insight_context,
+    users_plant_insight_tool,
+)
+from app.models.action_type import ActionType
+from app.models.base import Base
+from app.models.plant import Plant
+from app.models.schedule import Schedule
+from app.models.task_completion import TaskCompletion
+
+
+def test_generic_plants_query_returns_all_owned_plants() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=Session)
+    db = session_factory()
+    try:
+        user_id = "user-1"
+        other_user_id = "user-2"
+        db.add_all(
+            [
+                Plant(user_id=user_id, name="Pothos", species="Epipremnum aureum"),
+                Plant(user_id=user_id, name="Snake Plant", species="Dracaena trifasciata"),
+                Plant(user_id=other_user_id, name="Other Cactus", species="Mammillaria"),
+            ]
+        )
+        db.commit()
+
+        db_token, user_id_token = set_user_insight_context(db, user_id)
+        try:
+            payload = get_user_plant_insight_payload(query="plants")
+        finally:
+            reset_user_insight_context(db_token, user_id_token)
+
+        names = {item["name"] for item in payload["items"]}
+        assert payload["total_count"] == 2
+        assert payload["matched_count"] == 2
+        assert names == {"Pothos", "Snake Plant"}
+    finally:
+        db.close()
+
+
+def test_plant_insight_tool_accepts_loose_llm_arguments() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=Session)
+    db = session_factory()
+    try:
+        user_id = "user-1"
+        db.add_all(
+            [
+                Plant(user_id=user_id, name="Pothos", species="Epipremnum aureum"),
+                Plant(user_id=user_id, name="Snake Plant", species="Dracaena trifasciata"),
+            ]
+        )
+        db.commit()
+
+        db_token, user_id_token = set_user_insight_context(db, user_id)
+        try:
+            all_limit_payload = users_plant_insight_tool.invoke(
+                {"query": "plants", "limit": "all"}
+            )
+            null_arg_payload = users_plant_insight_tool.invoke({"query": None, "limit": None})
+        finally:
+            reset_user_insight_context(db_token, user_id_token)
+
+        assert '"matched_count": 2' in all_limit_payload
+        assert '"matched_count": 2' in null_arg_payload
+    finally:
+        db.close()
+
+
+def test_plant_insight_includes_schedules_and_task_completions() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=Session)
+    db = session_factory()
+    try:
+        user_id = "user-1"
+        plant = Plant(
+            user_id=user_id,
+            name="Pothos",
+            species="Epipremnum aureum",
+            potted_date=date(2026, 1, 1),
+            image_path="/uploads/pothos.jpg",
+            note="Kitchen shelf.",
+            is_paused=False,
+            overview="Trailing houseplant.",
+            water="Water when top soil dries.",
+            sunlight="Bright indirect light.",
+            fertilizer="Monthly in growing season.",
+            propagating="Stem cuttings.",
+            varieties="Golden pothos",
+            humidity="Average home humidity.",
+            temperature="18-29C",
+            soil="Well-draining mix.",
+            running="Fast trailing growth.",
+            potting_and_repotting="Repot in spring.",
+            pests_and_diseases="Watch for mealybugs.",
+            toxicity="Toxic to pets.",
+            propagation="Cut below a node.",
+        )
+        action_type = ActionType(user_id=user_id, name="Water", icon="water", color="#00AEEF")
+        db.add_all([plant, action_type])
+        db.commit()
+        db.refresh(plant)
+        db.refresh(action_type)
+
+        schedule = Schedule(
+            user_id=user_id,
+            plant_id=plant.id,
+            action_type_id=action_type.id,
+            frequency_type="INTERVAL",
+            frequency_days=3,
+            days_of_week=None,
+            scheduled_time=time(9, 0),
+            note="Morning water",
+            last_completed_at=datetime(2026, 6, 17, 9, 0, tzinfo=timezone.utc),
+            next_due_at=datetime(2026, 6, 20, 9, 0, tzinfo=timezone.utc),
+            start_date=date(2026, 6, 1),
+        )
+        db.add(schedule)
+        db.commit()
+        db.refresh(schedule)
+
+        task_completion = TaskCompletion(
+            user_id=user_id,
+            schedule_id=schedule.id,
+            completion_date=date(2026, 6, 17),
+            completed_at=datetime(2026, 6, 17, 9, 5, tzinfo=timezone.utc),
+        )
+        db.add(task_completion)
+        db.commit()
+        db.refresh(task_completion)
+
+        db_token, user_id_token = set_user_insight_context(db, user_id)
+        try:
+            payload = get_user_plant_insight_payload(query="pothos")
+        finally:
+            reset_user_insight_context(db_token, user_id_token)
+
+        assert payload["matched_count"] == 1
+        item = payload["items"][0]
+        assert item["id"] == plant.id
+        assert item["user_id"] == user_id
+        assert item["image_path"] == "/uploads/pothos.jpg"
+        assert item["propagation"] == "Cut below a node."
+        assert item["version"] == 1
+
+        assert len(item["schedules"]) == 1
+        schedule_payload = item["schedules"][0]
+        assert schedule_payload["id"] == schedule.id
+        assert schedule_payload["plant_id"] == plant.id
+        assert schedule_payload["action_type_id"] == action_type.id
+        assert schedule_payload["action_type"]["name"] == "Water"
+        assert schedule_payload["frequency_type"] == "INTERVAL"
+        assert schedule_payload["frequency_days"] == 3
+        assert schedule_payload["scheduled_time"] == time(9, 0)
+        assert schedule_payload["note"] == "Morning water"
+
+        assert len(schedule_payload["task_completions"]) == 1
+        completion_payload = schedule_payload["task_completions"][0]
+        assert completion_payload["id"] == task_completion.id
+        assert completion_payload["schedule_id"] == schedule.id
+        assert completion_payload["completion_date"] == date(2026, 6, 17)
+        assert completion_payload["version"] == 1
+    finally:
+        db.close()
+
+
+def test_plant_insight_parses_yesterday_and_reports_missed_tasks() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=Session)
+    db = session_factory()
+    try:
+        user_id = "user-1"
+        action_type = ActionType(user_id=user_id, name="Water", icon="water", color="#00AEEF")
+        missed_plant = Plant(user_id=user_id, name="Pothos", species="Epipremnum aureum")
+        completed_plant = Plant(user_id=user_id, name="Snake Plant", species="Dracaena trifasciata")
+        db.add_all([action_type, missed_plant, completed_plant])
+        db.commit()
+        db.refresh(action_type)
+        db.refresh(missed_plant)
+        db.refresh(completed_plant)
+
+        yesterday = date(2026, 6, 17)
+        missed_schedule = Schedule(
+            user_id=user_id,
+            plant_id=missed_plant.id,
+            action_type_id=action_type.id,
+            frequency_type="INTERVAL",
+            frequency_days=1,
+            scheduled_time=time(9, 0),
+            start_date=yesterday,
+        )
+        completed_schedule = Schedule(
+            user_id=user_id,
+            plant_id=completed_plant.id,
+            action_type_id=action_type.id,
+            frequency_type="INTERVAL",
+            frequency_days=1,
+            scheduled_time=time(10, 0),
+            start_date=yesterday,
+        )
+        db.add_all([missed_schedule, completed_schedule])
+        db.commit()
+        db.refresh(missed_schedule)
+        db.refresh(completed_schedule)
+
+        older_completion = TaskCompletion(
+            user_id=user_id,
+            schedule_id=missed_schedule.id,
+            completion_date=date(2026, 6, 16),
+            completed_at=datetime(2026, 6, 16, 9, 5, tzinfo=timezone.utc),
+        )
+        yesterday_completion = TaskCompletion(
+            user_id=user_id,
+            schedule_id=completed_schedule.id,
+            completion_date=yesterday,
+            completed_at=datetime(2026, 6, 17, 10, 5, tzinfo=timezone.utc),
+        )
+        db.add_all([older_completion, yesterday_completion])
+        db.commit()
+
+        db_token, user_id_token = set_user_insight_context(db, user_id)
+        try:
+            payload = get_user_plant_insight_payload(
+                query="tell me all task that i missed yesterday",
+                today=date(2026, 6, 18),
+            )
+        finally:
+            reset_user_insight_context(db_token, user_id_token)
+
+        assert payload["date_filter"]["kind"] == "yesterday"
+        assert payload["date_filter"]["date"] == yesterday
+        assert payload["completed_task_count"] == 1
+        assert payload["missed_task_count"] == 1
+        assert payload["missed_tasks"][0]["plant_name"] == "Pothos"
+
+        completions_by_schedule = {
+            schedule["id"]: schedule["task_completions"]
+            for item in payload["items"]
+            for schedule in item["schedules"]
+        }
+        assert completions_by_schedule[missed_schedule.id] == []
+        assert len(completions_by_schedule[completed_schedule.id]) == 1
+        assert completions_by_schedule[completed_schedule.id][0]["completion_date"] == yesterday
+    finally:
+        db.close()

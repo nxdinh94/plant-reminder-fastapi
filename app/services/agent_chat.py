@@ -34,6 +34,14 @@ except ModuleNotFoundError:
 
 from app.agent_tools.datetime_tool import datetime_tool, generate_datetime_response, is_datetime_request
 from app.agent_tools.small_talk import generate_small_talk_response, small_talk_tool
+from app.agent_tools.user_insights import (
+    get_user_journal_insight_payload,
+    get_user_plant_insight_payload,
+    reset_user_insight_context,
+    set_user_insight_context,
+    users_journal_insight_tool,
+    users_plant_insight_tool,
+)
 from app.core.config import settings
 from app.models.chat_plant_proposal import ChatPlantProposal
 from app.services.media_storage import (
@@ -60,12 +68,15 @@ OpenRouter quickstart context:
 
 SYSTEM_PROMPT = f"""\
 You are a simple Plant Reminder assistant.
-Current capability target: friendly small talk first.
 Keep answers concise and clear.
 Use small_talk_tool when a message is greeting/chitchat/thanks/bye/how-are-you.
-Use datetime_tool for date/time/timezone questions.
+Use datetime_tool for pure date/time/timezone questions.
 Use plant_image_detect_tool when the user provides or asks to analyze base64 plant image data.
-If the user asks beyond current capability, clearly say you currently support small talk, datetime, and plant image detection.
+Use users_plant_insight_tool only for saved plant/library/profile/care-field/schedule/task-completion questions, including relative dates such as today, yesterday, or tomorrow when the user asks about plant tasks.
+Use users_journal_insight_tool only for journal, note, log, history, progress, symptoms-over-time, or what-the-user-recorded questions.
+If wording is ambiguous like "my plant" and does not mention journal/history/notes/logs, choose users_plant_insight_tool only.
+Do not call both plant and journal insight tools unless the user explicitly asks for both saved plant profile details and journal history.
+If the user asks beyond current capability, clearly say you currently support small talk, datetime, plant image detection, saved plant insight, and journal insight.
 
 Reference document context:
 {OPENROUTER_QUICKSTART_CONTEXT}
@@ -226,6 +237,14 @@ class LangGraphChatAgent:
                 }
             )
 
+        insight_tools = [
+            small_talk_tool,
+            datetime_tool,
+            users_plant_insight_tool,
+            users_journal_insight_tool,
+            plant_image_detect_tool,
+        ]
+
         self._llm = init_chat_model(
             settings.openrouter_model,
             model_provider="openai",
@@ -236,9 +255,9 @@ class LangGraphChatAgent:
                 "X-OpenRouter-Title": settings.openrouter_site_name or "",
             },
             temperature=0.2,
-        ).bind_tools([small_talk_tool, datetime_tool, plant_image_detect_tool])
+        ).bind_tools(insight_tools)
 
-        tool_node = ToolNode([small_talk_tool, datetime_tool, plant_image_detect_tool])
+        tool_node = ToolNode(insight_tools)
 
         def assistant_node(state: MessagesState) -> dict[str, list[BaseMessage]]:
             model_response = self._llm.invoke(state["messages"])
@@ -348,6 +367,266 @@ class LangGraphChatAgent:
 
         return "I couldn't analyze the plant image to answer your question right now. Please try again."
 
+    @staticmethod
+    def _classify_user_insight_request(message: str) -> str | None:
+        normalized = message.strip().lower()
+        if not normalized:
+            return None
+
+        journal_keywords = (
+            "journal",
+            "journals",
+            "note",
+            "notes",
+            "log",
+            "logs",
+            "history",
+            "record",
+            "recorded",
+            "write",
+            "wrote",
+            "entry",
+            "entries",
+            "progress",
+            "symptom",
+            "symptoms",
+            "observation",
+            "observations",
+        )
+        plant_keywords = (
+            "my plant",
+            "my plants",
+            "plant",
+            "plants",
+            "saved",
+            "library",
+            "species",
+            "care",
+            "water",
+            "sunlight",
+            "fertilizer",
+            "humidity",
+            "temperature",
+            "soil",
+            "pest",
+            "disease",
+            "toxic",
+            "paused",
+            "profile",
+            "task",
+            "tasks",
+            "reminder",
+            "reminders",
+            "schedule",
+            "schedules",
+            "completion",
+            "completions",
+            "completed",
+            "missed",
+            "overdue",
+            "due",
+        )
+        if any(keyword in normalized for keyword in journal_keywords):
+            return "journal"
+        if any(keyword in normalized for keyword in plant_keywords):
+            return "plant"
+        return None
+
+    @staticmethod
+    def _is_small_talk_request(message: str) -> bool:
+        normalized = re.sub(r"[^a-z0-9\s']", " ", message.strip().lower())
+        tokens = normalized.split()
+        if not tokens or len(tokens) > 8:
+            return False
+
+        small_talk_phrases = (
+            "hi",
+            "hello",
+            "hey",
+            "good morning",
+            "good afternoon",
+            "good evening",
+            "thanks",
+            "thank you",
+            "bye",
+            "goodbye",
+            "how are you",
+            "how's it going",
+            "whats up",
+            "what's up",
+        )
+        compact = " ".join(tokens)
+        if compact in small_talk_phrases:
+            return True
+        return tokens[0] in {"hi", "hello", "hey"} and len(tokens) <= 4
+
+    def _local_known_intent_response(
+        self,
+        message: str,
+        db: Session | None,
+        user_id: str | None,
+        language: str,
+    ) -> AgentChatResponse | None:
+        fallback_response = self._fallback_user_insight_response(message, db, user_id)
+        if fallback_response is not None:
+            return fallback_response
+        if is_datetime_request(message):
+            return AgentChatResponse(
+                reply=generate_datetime_response(language=language),
+                tool_calls=[AgentToolCall(name="datetime_tool")],
+            )
+        if self._is_small_talk_request(message):
+            return AgentChatResponse(
+                reply=generate_small_talk_response(message, language=language),
+                tool_calls=[AgentToolCall(name="small_talk_tool")],
+            )
+        return None
+
+    @staticmethod
+    def _markdown_text(value: Any, fallback: str = "") -> str:
+        text = str(value if value is not None else fallback).strip()
+        return text.replace("|", "\\|")
+
+    @staticmethod
+    def _markdown_time(value: Any) -> str:
+        text = str(value or "").strip()
+        if len(text) >= 5 and text[2] == ":":
+            return text[:5]
+        return text
+
+    @staticmethod
+    def _summarize_plant_insight(payload: dict[str, Any]) -> str:
+        if payload.get("status") != "ok":
+            return str(payload.get("message") or "I could not read your saved plant data right now.")
+        if payload.get("total_count", 0) == 0:
+            return "You do not have any saved plants yet."
+        if payload.get("matched_count", 0) == 0:
+            return "I found saved plants, but none matched that question."
+
+        items = payload.get("items", [])
+        if not isinstance(items, list) or not items:
+            return "I found matching saved plants, but there are no details to summarize."
+        missed_tasks = payload.get("missed_tasks")
+        if isinstance(missed_tasks, list):
+            date_filter = payload.get("date_filter")
+            filtered_date = None
+            if isinstance(date_filter, dict):
+                filtered_date = date_filter.get("date")
+            if not missed_tasks:
+                date_suffix = f" for {filtered_date}" if filtered_date else ""
+                return f"**No missed plant tasks{date_suffix}.**"
+            rows = [
+                "| Plant | Task | Time |",
+                "|---|---|---|",
+            ]
+            for task in missed_tasks:
+                if not isinstance(task, dict):
+                    continue
+                plant_name = LangGraphChatAgent._markdown_text(task.get("plant_name"), "Unknown plant")
+                action_type = task.get("action_type")
+                action_name = None
+                if isinstance(action_type, dict):
+                    action_name = action_type.get("name")
+                rows.append(
+                    "| "
+                    f"{plant_name} | "
+                    f"{LangGraphChatAgent._markdown_text(action_name, 'Task')} | "
+                    f"{LangGraphChatAgent._markdown_time(task.get('scheduled_time'))} |"
+                )
+            date_suffix = f" for {filtered_date}" if filtered_date else ""
+            count = payload.get("missed_task_count", max(0, len(rows) - 2))
+            return f"**You missed {count} scheduled plant task(s){date_suffix}.**\n\n" + "\n".join(rows)
+        lines = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            details = []
+            species = item.get("species")
+            if species:
+                details.append(f"species: {species}")
+            if item.get("is_paused"):
+                details.append("paused")
+            note = item.get("profile_note")
+            if note:
+                details.append(f"note: {note}")
+            care = item.get("water") or item.get("sunlight") or item.get("soil")
+            if care:
+                details.append(f"care: {care}")
+            schedules = item.get("schedules")
+            if isinstance(schedules, list):
+                task_completion_count = sum(
+                    len(schedule.get("task_completions", []))
+                    for schedule in schedules
+                    if isinstance(schedule, dict)
+                )
+                details.append(
+                    f"schedules: {len(schedules)}, task completions: {task_completion_count}"
+                )
+            suffix = f" ({'; '.join(details)})" if details else ""
+            plant_name = LangGraphChatAgent._markdown_text(item.get("name"), "Unnamed plant")
+            lines.append(f"- **{plant_name}**{suffix}")
+        return f"**Saved plants found: {payload.get('matched_count')}**\n\n" + "\n".join(lines)
+
+    @staticmethod
+    def _summarize_journal_insight(payload: dict[str, Any]) -> str:
+        if payload.get("status") != "ok":
+            return str(payload.get("message") or "I could not read your journal data right now.")
+        if payload.get("total_count", 0) == 0:
+            return "You do not have any plant journal entries yet."
+        if payload.get("matched_count", 0) == 0:
+            return "I found journal entries, but none matched that question."
+
+        items = payload.get("items", [])
+        if not isinstance(items, list) or not items:
+            return "I found matching journal entries, but there are no details to summarize."
+        lines = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            entry_date = item.get("entry_date") or "unknown date"
+            plant_name = LangGraphChatAgent._markdown_text(item.get("plant_name"), "Unknown plant")
+            content = LangGraphChatAgent._markdown_text(item.get("content"))
+            lines.append(f"- **{entry_date} - {plant_name}:** {content}")
+        return f"**Journal entries found: {payload.get('matched_count')}**\n\n" + "\n".join(lines)
+
+    def _fallback_user_insight_response(
+        self,
+        message: str,
+        db: Session | None,
+        user_id: str | None,
+    ) -> AgentChatResponse | None:
+        insight_intent = self._classify_user_insight_request(message)
+        if insight_intent not in {"plant", "journal"}:
+            return None
+
+        if db is None or not user_id:
+            payload = {"status": "error", "message": "User insight context is unavailable for this request."}
+            if insight_intent == "plant":
+                return AgentChatResponse(
+                    reply=self._summarize_plant_insight(payload),
+                    tool_calls=[AgentToolCall(name="users_plant_insight_tool")],
+                )
+            return AgentChatResponse(
+                reply=self._summarize_journal_insight(payload),
+                tool_calls=[AgentToolCall(name="users_journal_insight_tool")],
+            )
+
+        db_token, user_id_token = set_user_insight_context(db, user_id)
+        try:
+            if insight_intent == "plant":
+                payload = get_user_plant_insight_payload(query=message)
+                return AgentChatResponse(
+                    reply=self._summarize_plant_insight(payload),
+                    tool_calls=[AgentToolCall(name="users_plant_insight_tool")],
+                )
+            payload = get_user_journal_insight_payload(query=message)
+            return AgentChatResponse(
+                reply=self._summarize_journal_insight(payload),
+                tool_calls=[AgentToolCall(name="users_journal_insight_tool")],
+            )
+        finally:
+            reset_user_insight_context(db_token, user_id_token)
+
     def chat(
         self,
         message: str,
@@ -355,6 +634,8 @@ class LangGraphChatAgent:
         thread_id: str | None = None,
         resume_interrupt: bool = False,
         language: str = "vi",
+        db: Session | None = None,
+        user_id: str | None = None,
     ) -> AgentChatResponse:
         if image_base64:
             intent = self._classify_intent(message) if message else "CREATE"
@@ -452,23 +733,31 @@ class LangGraphChatAgent:
                 tool_calls=[AgentToolCall(name="plant_image_detect_tool")],
             )
 
+        known_intent_response = self._local_known_intent_response(message, db, user_id, language)
+        if known_intent_response is not None:
+            return known_intent_response
+
         if not self._llm_enabled:
-            if is_datetime_request(message):
-                return AgentChatResponse(
-                    reply=generate_datetime_response(),
-                    tool_calls=[AgentToolCall(name="datetime_tool")],
-                )
             return AgentChatResponse(
-                reply=generate_small_talk_response(message),
+                reply=generate_small_talk_response(message, language=language),
                 tool_calls=[AgentToolCall(name="small_talk_tool")],
             )
 
-        response_messages = self._invoke_graph(
-            message,
-            thread_id=thread_id,
-            resume_interrupt=resume_interrupt,
-            language=language,
-        )
+        try:
+            response_messages = self._invoke_graph(
+                message,
+                thread_id=thread_id,
+                resume_interrupt=resume_interrupt,
+                language=language,
+                db=db,
+                user_id=user_id,
+            )
+        except Exception:
+            fallback_response = self._fallback_user_insight_response(message, db, user_id)
+            if fallback_response is not None:
+                logger.exception("LangGraph chat failed; returned local user insight fallback")
+                return fallback_response
+            raise
         reply = self._extract_final_reply(response_messages)
         tool_calls = self._extract_tool_calls(response_messages)
         return AgentChatResponse(reply=reply, tool_calls=tool_calls)
@@ -1176,64 +1465,86 @@ class LangGraphChatAgent:
         thread_id: str | None = None,
         resume_interrupt: bool = False,
         language: str = "vi",
+        db: Session | None = None,
+        user_id: str | None = None,
     ) -> Sequence[BaseMessage]:
         if self._graph is None:
             return [AIMessage(content=generate_small_talk_response(message))]
 
+        db_token = None
+        user_id_token = None
+        if db is not None and user_id:
+            db_token, user_id_token = set_user_insight_context(db, user_id)
+
         state: dict[str, Any]
-        sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
-        if thread_id is None:
-            state = self._graph.invoke(
-                {
-                    "messages": [
-                        SystemMessage(content=sys_prompt),
-                        HumanMessage(content=message),
-                    ]
-                }
-            )
-            return cast(Sequence[BaseMessage], state["messages"])
-
-        config = {"configurable": {"thread_id": thread_id}}
-        has_pending_interrupt = self._thread_has_pending_interrupt(config)
-
-        # Only resume when both conditions are true:
-        # 1) caller explicitly requests resume
-        # 2) this thread currently has a pending interrupt
-        if resume_interrupt and has_pending_interrupt:
-            state = self._graph.invoke(Command(resume=message), config=config)
-            return cast(Sequence[BaseMessage], state["messages"])
-
-        # Check if the thread already has messages in memory
         try:
-            snapshot = self._graph.get_state(config)
-            has_history = bool(snapshot.values and snapshot.values.get("messages"))
-        except Exception:
-            has_history = False
+            sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
+            if thread_id is None:
+                state = self._graph.invoke(
+                    {
+                        "messages": [
+                            SystemMessage(content=sys_prompt),
+                            HumanMessage(content=message),
+                        ]
+                    }
+                )
+                return cast(Sequence[BaseMessage], state["messages"])
 
-        # New turn input for same thread_id (multi-turn chat), not a resume.
-        if not has_history:
-            # First message on this thread: prepend SystemMessage instructions
-            state = self._graph.invoke(
-                {
-                    "messages": [
-                        SystemMessage(content=sys_prompt),
-                        HumanMessage(content=message),
-                    ]
-                },
-                config=config,
-            )
-        else:
-            # Subsequent messages: append the human message and instruct language
-            state = self._graph.invoke(
-                {
-                    "messages": [
-                        HumanMessage(content=message),
-                        SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."),
-                    ]
-                },
-                config=config,
-            )
-        return state["messages"]
+            config = {"configurable": {"thread_id": thread_id}}
+            previous_message_count = 0
+            has_history = False
+            try:
+                snapshot = self._graph.get_state(config)
+                previous_messages = (
+                    snapshot.values.get("messages")
+                    if getattr(snapshot, "values", None)
+                    else None
+                )
+                if isinstance(previous_messages, Sequence):
+                    previous_message_count = len(previous_messages)
+                    has_history = previous_message_count > 0
+            except Exception:
+                has_history = False
+            has_pending_interrupt = self._thread_has_pending_interrupt(config)
+
+            # Only resume when both conditions are true:
+            # 1) caller explicitly requests resume
+            # 2) this thread currently has a pending interrupt
+            if resume_interrupt and has_pending_interrupt:
+                state = self._graph.invoke(Command(resume=message), config=config)
+                messages = cast(Sequence[BaseMessage], state["messages"])
+                current_messages = messages[previous_message_count:]
+                return current_messages or messages
+
+            # New turn input for same thread_id (multi-turn chat), not a resume.
+            if not has_history:
+                # First message on this thread: prepend SystemMessage instructions
+                state = self._graph.invoke(
+                    {
+                        "messages": [
+                            SystemMessage(content=sys_prompt),
+                            HumanMessage(content=message),
+                        ]
+                    },
+                    config=config,
+                )
+            else:
+                # Subsequent messages: append the human message and instruct language
+                state = self._graph.invoke(
+                    {
+                        "messages": [
+                            HumanMessage(content=message),
+                            SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."),
+                        ]
+                    },
+                    config=config,
+                )
+            messages = cast(Sequence[BaseMessage], state["messages"])
+            current_messages = messages[previous_message_count:]
+            return current_messages or messages
+        finally:
+            if db_token is not None and user_id_token is not None:
+                reset_user_insight_context(db_token, user_id_token)
 
     def _thread_has_pending_interrupt(self, config: dict[str, dict[str, str]]) -> bool:
         if self._graph is None:

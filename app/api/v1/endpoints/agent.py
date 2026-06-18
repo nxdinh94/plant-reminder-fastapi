@@ -100,8 +100,17 @@ def chat_with_agent(
             thread_id=thread_id,
             resume_interrupt=payload.resume_interrupt,
             language=language,
+            db=db,
+            user_id=str(current_user.id),
         )
         response.thread_id = thread_id
+        tool_call_names = [tool_call.name for tool_call in response.tool_calls]
+        logger.info(
+            "Agent chat tool calls: user_id=%s thread_id=%s tool_calls=%s",
+            current_user.id,
+            thread_id,
+            tool_call_names,
+        )
 
         if response.reply.strip():
             try:

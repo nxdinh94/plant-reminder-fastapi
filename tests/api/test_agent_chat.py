@@ -148,21 +148,6 @@ def test_agent_chat_requires_auth(client: TestClient) -> None:
     assert response.status_code == 401
 
 
-def test_agent_chat_datetime_uses_tool(client: TestClient) -> None:
-    headers = register_and_auth_headers(client, "agent-datetime@example.com")
-
-    response = client.post(
-        "/api/v1/agent/chat",
-        json={"message": "what time is it now?"},
-        headers=headers,
-    )
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert any(term in payload["reply"] for term in ["Current datetime in", "UTC", "GMT", "2026"])
-    assert payload["tool_calls"] == [{"name": "datetime_tool"}]
-
-
 def test_agent_chat_with_image_uses_plant_detect_tool_and_returns_json(client: TestClient) -> None:
     headers = register_and_auth_headers(client, "agent-image@example.com")
 
@@ -378,7 +363,6 @@ def test_agent_chat_missed_yesterday_uses_plant_insight_tool(client: TestClient)
     assert response.status_code == 200
     payload = response.json()
     assert payload["tool_calls"] == [{"name": "users_plant_insight_tool"}]
-    assert "datetime_tool" not in [call["name"] for call in payload["tool_calls"]]
     assert "**You missed 1 scheduled plant task(s)" in payload["reply"]
     assert "| Plant | Task | Time |" in payload["reply"]
     assert "Pothos" in payload["reply"]

@@ -6,7 +6,7 @@ from sqlalchemy import and_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.api.v1.endpoints.common import bump_version
+from app.api.v1.endpoints.common import bump_version, soft_delete
 from app.core.config import settings
 from app.db.session import get_db
 from app.dependencies.auth import get_current_user
@@ -247,6 +247,11 @@ def _apply_generic_mutation(
         return entity.id
 
     if item.operation == "delete":
+        if model is TaskCompletion:
+            soft_delete(entity)
+            db.add(entity)
+            db.flush()
+            return entity.id
         db.delete(entity)
         db.flush()
         return entity.id

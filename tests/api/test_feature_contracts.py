@@ -308,6 +308,57 @@ def test_schedule_recurrence_and_completion_filters(client: TestClient) -> None:
     assert toggle_off.status_code == 200
     assert toggle_off.json() is None
 
+    sync_completion_date = "2026-02-13"
+    sync_completion = client.post(
+        "/api/v1/task-completions",
+        json={
+            "schedule_id": schedule_id,
+            "completion_date": sync_completion_date,
+        },
+        headers=headers,
+    )
+    assert sync_completion.status_code == 201
+    sync_completion_id = sync_completion.json()["id"]
+
+    cursor_response = client.get("/api/v1/sync/pull", headers=headers)
+    assert cursor_response.status_code == 200
+    sync_cursor = cursor_response.json()["next_cursor"]
+
+    sync_delete = client.post(
+        "/api/v1/sync/push",
+        json={
+            "operations": [
+                {
+                    "operation_id": "op-task-completion-delete",
+                    "entity_type": "task_completions",
+                    "operation": "delete",
+                    "entity_id": sync_completion_id,
+                    "payload": {},
+                }
+            ]
+        },
+        headers=headers,
+    )
+    assert sync_delete.status_code == 200
+    sync_delete_result = sync_delete.json()["results"][0]
+    assert sync_delete_result["status"] == "applied"
+
+    list_after_sync_delete = client.get(
+        "/api/v1/task-completions?start_date=2026-02-01&end_date=2026-02-28",
+        headers=headers,
+    )
+    assert list_after_sync_delete.status_code == 200
+    assert all(item["id"] != sync_completion_id for item in list_after_sync_delete.json())
+
+    pull_after_sync_delete = client.get(
+        "/api/v1/sync/pull",
+        params={"since": sync_cursor},
+        headers=headers,
+    )
+    assert pull_after_sync_delete.status_code == 200
+    tombstones = pull_after_sync_delete.json()["tombstones"]["task_completions"]
+    assert any(item["id"] == sync_completion_id for item in tombstones)
+
 
 def test_cross_user_resource_isolation(client: TestClient) -> None:
     headers_user_a = auth_headers(client, "owner-a@example.com")

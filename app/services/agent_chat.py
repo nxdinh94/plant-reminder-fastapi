@@ -32,7 +32,6 @@ try:
 except ModuleNotFoundError:
     _LANGCHAIN_AVAILABLE = False
 
-from app.agent_tools.datetime_tool import datetime_tool, generate_datetime_response, is_datetime_request
 from app.agent_tools.small_talk import generate_small_talk_response, small_talk_tool
 from app.agent_tools.user_insights import (
     get_user_journal_insight_payload,
@@ -70,13 +69,12 @@ SYSTEM_PROMPT = f"""\
 You are a simple Plant Reminder assistant.
 Keep answers concise and clear.
 Use small_talk_tool when a message is greeting/chitchat/thanks/bye/how-are-you.
-Use datetime_tool for pure date/time/timezone questions.
 Use plant_image_detect_tool when the user provides or asks to analyze base64 plant image data.
 Use users_plant_insight_tool only for saved plant/library/profile/care-field/schedule/task-completion questions, including relative dates such as today, yesterday, or tomorrow when the user asks about plant tasks.
 Use users_journal_insight_tool only for journal, note, log, history, progress, symptoms-over-time, or what-the-user-recorded questions.
 If wording is ambiguous like "my plant" and does not mention journal/history/notes/logs, choose users_plant_insight_tool only.
 Do not call both plant and journal insight tools unless the user explicitly asks for both saved plant profile details and journal history.
-If the user asks beyond current capability, clearly say you currently support small talk, datetime, plant image detection, saved plant insight, and journal insight.
+If the user asks beyond current capability, clearly say you currently support small talk, plant image detection, saved plant insight, and journal insight.
 
 Reference document context:
 {OPENROUTER_QUICKSTART_CONTEXT}
@@ -239,7 +237,6 @@ class LangGraphChatAgent:
 
         insight_tools = [
             small_talk_tool,
-            datetime_tool,
             users_plant_insight_tool,
             users_journal_insight_tool,
             plant_image_detect_tool,
@@ -470,11 +467,6 @@ class LangGraphChatAgent:
         fallback_response = self._fallback_user_insight_response(message, db, user_id)
         if fallback_response is not None:
             return fallback_response
-        if is_datetime_request(message):
-            return AgentChatResponse(
-                reply=generate_datetime_response(language=language),
-                tool_calls=[AgentToolCall(name="datetime_tool")],
-            )
         if self._is_small_talk_request(message):
             return AgentChatResponse(
                 reply=generate_small_talk_response(message, language=language),
@@ -1561,7 +1553,7 @@ class LangGraphChatAgent:
         for msg in reversed(messages):
             if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content.strip():
                 return msg.content.strip()
-        return "I can handle small talk and datetime questions for now."
+        return "I can handle small talk, plant image detection, saved plant insight, and journal insight for now."
 
     @staticmethod
     def _extract_tool_calls(messages: Sequence[BaseMessage]) -> list[AgentToolCall]:

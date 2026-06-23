@@ -66,15 +66,14 @@ OpenRouter quickstart context:
 """
 
 SYSTEM_PROMPT = f"""\
-You are a simple Plant Reminder assistant.
+You are a friendly Plant Reminder assistant.
 Keep answers concise and clear.
 Use small_talk_tool when a message is greeting/chitchat/thanks/bye/how-are-you.
-Use plant_image_detect_tool when the user provides or asks to analyze base64 plant image data.
 Use users_plant_insight_tool only for saved plant/library/profile/care-field/schedule/task-completion questions, including relative dates such as today, yesterday, or tomorrow when the user asks about plant tasks.
 Use users_journal_insight_tool only for journal, note, log, history, progress, symptoms-over-time, or what-the-user-recorded questions.
 If wording is ambiguous like "my plant" and does not mention journal/history/notes/logs, choose users_plant_insight_tool only.
 Do not call both plant and journal insight tools unless the user explicitly asks for both saved plant profile details and journal history.
-If the user asks beyond current capability, clearly say you currently support small talk, plant image detection, saved plant insight, and journal insight.
+If the user asks beyond current capability, clearly say you currently support small talk, plant image analysis, saved plant insight, and journal insight.
 
 Reference document context:
 {OPENROUTER_QUICKSTART_CONTEXT}
@@ -160,6 +159,7 @@ class LangGraphChatAgent:
         self._vision_llm: Any | None = None
         self._pool: ConnectionPool | None = None
         self._checkpointer = None
+        self._last_uploaded_image: dict[str, str] = {}
         if _LANGCHAIN_AVAILABLE:
             conn_url = settings.database_url
             if conn_url.startswith("postgresql+psycopg://"):
@@ -208,38 +208,10 @@ class LangGraphChatAgent:
                 logger.exception("Error closing LangGraph Postgres checkpointer connection pool.")
 
     def _build_graph(self) -> Any:
-        @tool("plant_image_detect_tool")
-        def plant_image_detect_tool(
-            image_base64: str,
-            state_messages: Annotated[list[BaseMessage], InjectedState("messages")] | None = None,
-        ) -> str:
-            """Detect plant information from a base64 image payload and return JSON result."""
-            language = "en"
-            if state_messages:
-                for msg in state_messages:
-                    if isinstance(msg, SystemMessage) and "Vietnamese" in msg.content:
-                        language = "vi"
-                        break
-            try:
-                detected = self._detect_plant(image_base64, language=language)
-            except TypeError:
-                detected = self._detect_plant(image_base64)
-            if detected is None:
-                return json.dumps({"status": "not_detected"})
-            return json.dumps(
-                {
-                    "status": "detected",
-                    "plant_name": detected.plant_name,
-                    "species": detected.species,
-                    "note": detected.note,
-                }
-            )
-
         insight_tools = [
             small_talk_tool,
             users_plant_insight_tool,
             users_journal_insight_tool,
-            plant_image_detect_tool,
         ]
 
         self._llm = init_chat_model(
@@ -279,43 +251,37 @@ class LangGraphChatAgent:
         return graph.compile(checkpointer=self._checkpointer)
 
     def _classify_intent(self, message: str) -> str:
-        """Classify if the user wants to CREATE/add a plant reminder, or just ask a QUESTION."""
+        """Classify if the user wants to SAVE/add a plant or just ask a QUESTION about it."""
         cleaned_msg = message.strip()
-        if not cleaned_msg or cleaned_msg.lower() in [
-            "sent a plant image",
-            "uploaded a plant image",
-            "uploaded a plant image.",
-            "sent a plant image.",
-            "analyze this image",
-            "tell me about this plant",
-        ]:
-            return "CREATE"
+        if not cleaned_msg:
+            # Empty message with image → ask clarification (handled by caller)
+            return "CLARIFY"
 
         prompt = (
             f"The user uploaded a plant image and sent this message: \"{cleaned_msg}\"\n"
-            "Does the user want to create/add/register this plant to their library/reminders list, "
+            "Does the user want to save/add/register this plant to their library/reminders list, "
             "or are they just asking a general question/identifying the plant/asking for advice/having small talk?\n"
-            "Respond with exactly one word: 'CREATE' (if they want to create/add/register/save a reminder for the plant) "
+            "Respond with exactly one word: 'SAVE' (if they want to save/add/register a reminder for the plant) "
             "or 'QUESTION' (if they are asking a question, identifying the plant, or chatting without requesting to save/create a reminder)."
         )
         try:
             if not _LANGCHAIN_AVAILABLE:
-                return "CREATE"
+                return "SAVE"
             llm_to_use = self._vision_llm or self._llm
             if llm_to_use is not None:
                 response = llm_to_use.invoke(
                     [
-                        SystemMessage(content="You are an intent classification assistant. Respond only with 'CREATE' or 'QUESTION'."),
+                        SystemMessage(content="You are an intent classification assistant. Respond only with 'SAVE' or 'QUESTION'."),
                         HumanMessage(content=prompt),
                     ]
                 )
                 raw_classification = self._chunk_text(response.content).strip().upper()
                 if "QUESTION" in raw_classification:
                     return "QUESTION"
-            return "CREATE"
+            return "SAVE"
         except Exception:
-            logger.exception("Failed to classify user intent; defaulting to CREATE")
-            return "CREATE"
+            logger.exception("Failed to classify user intent; defaulting to SAVE")
+            return "SAVE"
 
     def _answer_question_with_image(self, message: str, image_base64: str, language: str = "vi") -> str:
         """Answer the user's question using the plant image."""
@@ -363,6 +329,69 @@ class LangGraphChatAgent:
                 logger.exception("Failed to call vision model %s", model)
 
         return "I couldn't analyze the plant image to answer your question right now. Please try again."
+
+
+    def _describe_image(self, image_base64: str, language: str = "vi") -> str:
+        """Analyze the image and generate a dynamic description + follow-up options."""
+        data_url = self._normalize_to_data_url(image_base64)
+        if data_url is None:
+            return (
+                "I couldn't read the image. Please upload a clear photo of the plant."
+                if language != "vi" else
+                "Tôi không thể đọc được hình ảnh. Vui lòng tải lên một bức ảnh rõ ràng của cây."
+            )
+
+        prompt = (
+            "The user has uploaded a plant image without saying anything.\n"
+            "Analyze the image, describe briefly what you see (e.g. what plant/object it is), "
+            "and friendly ask what they would like to do with it. Provide a few options:\n"
+            "- Identify it / show care tips\n"
+            "- Save / add it to their library\n"
+            "- Something else?\n\n"
+            f"Your entire response MUST be in {'Vietnamese' if language == 'vi' else 'English'}."
+        )
+        try:
+            if _LANGCHAIN_AVAILABLE and self._vision_llm is not None:
+                response = self._vision_llm.invoke(
+                    [
+                        SystemMessage(content="You are a helpful plant care assistant. Describe the image and ask what the user wants to do next."),
+                        HumanMessage(
+                            content=[
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": data_url}},
+                            ]
+                        ),
+                    ]
+                )
+                return self._chunk_text(response.content).strip()
+        except Exception:
+            logger.exception("Failed to invoke self._vision_llm for image description")
+
+        # Fallback to model candidates
+        for model in self._vision_model_candidates():
+            try:
+                raw = self._invoke_vision_openrouter_rest(prompt, data_url, model)
+                if raw:
+                    return raw
+            except TypeError:
+                raw = self._invoke_vision_openrouter_rest(prompt, data_url)
+                if raw:
+                    return raw
+            except Exception:
+                logger.exception("Failed to call vision model %s for description", model)
+
+        # Final static fallback if all API calls fail
+        return (
+            "I can see a plant in this image! 🌱 What would you like me to do?\n"
+            "- **Identify** it and tell you about it\n"
+            "- **Add it to your plant library** with care reminders\n"
+            "- Something else?"
+            if language != "vi" else
+            "Tôi thấy một cây trong hình ảnh này! 🌱 Bạn muốn tôi làm gì?\n"
+            "- **Nhận dạng** và cho bạn biết thêm về nó\n"
+            "- **Thêm vào thư viện cây** của bạn kèm lịch nhắc nhở chăm sóc\n"
+            "- Điều gì khác?"
+        )
 
     @staticmethod
     def _classify_user_insight_request(message: str) -> str | None:
@@ -509,7 +538,6 @@ class LangGraphChatAgent:
                 return f"**No missed plant tasks{date_suffix}.**"
             rows = [
                 "| Plant | Task | Time |",
-                "|---|---|---|",
             ]
             for task in missed_tasks:
                 if not isinstance(task, dict):
@@ -619,110 +647,209 @@ class LangGraphChatAgent:
         finally:
             reset_user_insight_context(db_token, user_id_token)
 
+    def _update_graph_history(
+        self,
+        thread_id: str | None,
+        user_content: str,
+        assistant_content: str,
+        language: str = "en",
+    ) -> None:
+        """Update LangGraph state with a user+assistant exchange (no DB write)."""
+        if not thread_id or self._graph is None or not _LANGCHAIN_AVAILABLE:
+            return
+        config = {"configurable": {"thread_id": thread_id}}
+        try:
+            snapshot = self._graph.get_state(config)
+            has_history = bool(snapshot.values and snapshot.values.get("messages"))
+        except Exception:
+            has_history = False
+
+        new_messages = []
+        if not has_history:
+            sys_prompt = SYSTEM_PROMPT + (
+                "\nResponse MUST be in Vietnamese language." if language == "vi"
+                else "\nResponse MUST be in English language."
+            )
+            new_messages.append(SystemMessage(content=sys_prompt))
+        else:
+            new_messages.append(SystemMessage(
+                content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."
+            ))
+        new_messages.append(HumanMessage(content=user_content))
+        new_messages.append(AIMessage(content=assistant_content))
+        try:
+            self._graph.update_state(config, {"messages": new_messages})
+        except Exception:
+            logger.exception("Failed to update LangGraph state")
+
+    def _auto_save_plant(
+        self,
+        detected: PlantDetectionData,
+        image_base64: str,
+        user_id: str,
+        db: Session,
+        language: str = "en",
+    ) -> dict[str, Any] | None:
+        """Detect plant from image, save image file, persist Plant row to DB. Returns saved plant data or None on failure."""
+        from app.models.plant import Plant as PlantModel
+        try:
+            image_path = _save_base64_image(image_base64, user_id)
+        except ValueError:
+            logger.warning("_auto_save_plant: failed to save image for user_id=%s", user_id)
+            image_path = ""
+
+        try:
+            plant = PlantModel(
+                user_id=user_id,
+                name=detected.plant_name,
+                species=detected.species,
+                image_path=image_path or None,
+                note=detected.note,
+                overview=detected.overview,
+                water=detected.water,
+                sunlight=detected.sunlight,
+                fertilizer=detected.fertilizer,
+                propagating=detected.propagating,
+                varieties=",".join(detected.varieties) if detected.varieties else None,
+                humidity=detected.humidity,
+                temperature=detected.temperature,
+                soil=detected.soil,
+                running=detected.running,
+                potting_and_repotting=detected.potting_and_repotting,
+                pests_and_diseases=detected.pests_and_diseases,
+                toxicity=detected.toxicity,
+                propagation=detected.propagation,
+            )
+            db.add(plant)
+            db.commit()
+            db.refresh(plant)
+            logger.info(
+                "_auto_save_plant: saved plant id=%s name=%r for user_id=%s",
+                plant.id, detected.plant_name, user_id,
+            )
+            return {"plant_name": detected.plant_name, "plant_id": str(plant.id)}
+        except Exception:
+            db.rollback()
+            logger.exception("_auto_save_plant: DB save failed for user_id=%s", user_id)
+            return None
+
+
     def chat(
         self,
         message: str,
         image_base64: str | None = None,
         thread_id: str | None = None,
-        resume_interrupt: bool = False,
         language: str = "vi",
         db: Session | None = None,
         user_id: str | None = None,
     ) -> AgentChatResponse:
+        if image_base64 and thread_id:
+            self._last_uploaded_image[thread_id] = image_base64
+
+        if not image_base64 and thread_id and thread_id in self._last_uploaded_image:
+            message_stripped = (message or "").strip()
+            if message_stripped and self._classify_intent(message_stripped) == "SAVE":
+                image_base64 = self._last_uploaded_image[thread_id]
+
         if image_base64:
-            intent = self._classify_intent(message) if message else "CREATE"
+            message_stripped = (message or "").strip()
+
+            # ── Case 1: image with NO text → ask the user what they want ──
+            if not message_stripped:
+                reply_content = self._describe_image(image_base64, language=language)
+                self._update_graph_history(
+                    thread_id=thread_id,
+                    user_content="[Gửi ảnh cây]" if language == "vi" else "[Sent a plant image]",
+                    assistant_content=reply_content,
+                    language=language,
+                )
+                return AgentChatResponse(reply=reply_content, tool_calls=[])
+
+            # ── Case 2: image + text → classify intent ──
+            intent = self._classify_intent(message_stripped)
+
             if intent == "QUESTION":
                 try:
-                    reply_content = self._answer_question_with_image(message, image_base64, language=language)
+                    reply_content = self._answer_question_with_image(message_stripped, image_base64, language=language)
                 except TypeError:
-                    reply_content = self._answer_question_with_image(message, image_base64)
-                if thread_id and self._graph is not None and _LANGCHAIN_AVAILABLE:
-                    config = {"configurable": {"thread_id": thread_id}}
-                    try:
-                        snapshot = self._graph.get_state(config)
-                        has_history = bool(snapshot.values and snapshot.values.get("messages"))
-                    except Exception:
-                        has_history = False
-
-                    new_messages = []
-                    if not has_history:
-                        sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
-                        new_messages.append(SystemMessage(content=sys_prompt))
-                    else:
-                        new_messages.append(SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."))
-                    
-                    user_content = message.strip() if message else ""
-                    if not user_content:
-                        user_content = "Uploaded a plant image."
-                    else:
-                        user_content = f"{user_content} [Uploaded a plant image.]"
-                    
-                    new_messages.append(HumanMessage(content=user_content))
-                    new_messages.append(AIMessage(content=reply_content))
-                    
-                    try:
-                        self._graph.update_state(config, {"messages": new_messages})
-                    except Exception:
-                        logger.exception("Failed to update LangGraph state with image chat message")
-
-                return AgentChatResponse(
-                    reply=reply_content,
-                    tool_calls=[],
+                    reply_content = self._answer_question_with_image(message_stripped, image_base64)
+                self._update_graph_history(
+                    thread_id=thread_id,
+                    user_content=f"{message_stripped} [Uploaded a plant image.]",
+                    assistant_content=reply_content,
+                    language=language,
                 )
+                return AgentChatResponse(reply=reply_content, tool_calls=[])
 
+            # intent == "SAVE" → detect and auto-save
             try:
                 detected = self._detect_plant(image_base64, language=language)
             except TypeError:
                 detected = self._detect_plant(image_base64)
+
             if detected is None:
-                payload = {
-                    "is_plant": False,
-                    "data": None,
-                }
+                if self._last_plant_image_failure_reason == "provider_error":
+                    reply_content = (
+                        "Image analysis is temporarily unavailable. Please try again in a moment."
+                        if language != "vi" else
+                        "Phân tích hình ảnh tạm thời không khả dụng. Vui lòng thử lại sau."
+                    )
+                elif self._last_plant_image_failure_reason == "invalid_image":
+                    reply_content = (
+                        "I couldn't read that image clearly. Please send a clearer photo of the plant."
+                        if language != "vi" else
+                        "Tôi không đọc được ảnh này rõ. Vui lòng gửi ảnh rõ hơn của cây."
+                    )
+                else:
+                    reply_content = (
+                        "I couldn't detect a plant in this image. Please try a clearer photo with better lighting."
+                        if language != "vi" else
+                        "Tôi không phát hiện được cây trong ảnh này. Vui lòng thử ảnh rõ hơn với ánh sáng tốt hơn."
+                    )
+                self._update_graph_history(
+                    thread_id=thread_id,
+                    user_content=f"{message_stripped} [Uploaded a plant image.]",
+                    assistant_content=reply_content,
+                    language=language,
+                )
+                return AgentChatResponse(reply=reply_content, tool_calls=[])
+
+            # Save image and persist plant to DB
+            saved_plant_data = None
+            if db is not None and user_id is not None:
+                saved_plant_data = self._auto_save_plant(detected, image_base64, user_id, db, language)
+
+            if saved_plant_data is not None:
+                plant_name = saved_plant_data.get("plant_name", detected.plant_name)
+                reply_content = (
+                    f"✅ **{plant_name}** has been saved to your plant library!\n\n"
+                    f"🌿 *{detected.species}*\n"
+                    + (f"\n{detected.note}" if detected.note else "")
+                    if language != "vi" else
+                    f"✅ **{plant_name}** đã được lưu vào thư viện cây của bạn!\n\n"
+                    f"🌿 *{detected.species}*\n"
+                    + (f"\n{detected.note}" if detected.note else "")
+                )
             else:
-                payload = {
-                    "is_plant": True,
-                    "data": {
-                        "plant_name": detected.plant_name,
-                        "species": detected.species,
-                        "note": detected.note,
-                    },
-                }
-            
-            reply_content = json.dumps(payload, ensure_ascii=False)
+                # DB unavailable — still show detection info
+                reply_content = (
+                    f"I detected **{detected.plant_name}** (*{detected.species}*). "
+                    "However, I was unable to save it to your library right now. Please try again."
+                    if language != "vi" else
+                    f"Tôi phát hiện **{detected.plant_name}** (*{detected.species}*). "
+                    "Tuy nhiên, tôi không thể lưu vào thư viện của bạn lúc này. Vui lòng thử lại."
+                )
 
-            if thread_id and self._graph is not None:
-                config = {"configurable": {"thread_id": thread_id}}
-                try:
-                    snapshot = self._graph.get_state(config)
-                    has_history = bool(snapshot.values and snapshot.values.get("messages"))
-                except Exception:
-                    has_history = False
-
-                new_messages = []
-                if not has_history:
-                    sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
-                    new_messages.append(SystemMessage(content=sys_prompt))
-                else:
-                    new_messages.append(SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."))
-                
-                user_content = message.strip() if message else ""
-                if not user_content:
-                    user_content = "Uploaded a plant image."
-                else:
-                    user_content = f"{user_content} [Uploaded a plant image.]"
-                
-                new_messages.append(HumanMessage(content=user_content))
-                new_messages.append(AIMessage(content=reply_content))
-                
-                try:
-                    self._graph.update_state(config, {"messages": new_messages})
-                except Exception:
-                    logger.exception("Failed to update LangGraph state with image chat message")
-
+            self._update_graph_history(
+                thread_id=thread_id,
+                user_content=f"{message_stripped} [Uploaded a plant image.]",
+                assistant_content=reply_content,
+                language=language,
+            )
             return AgentChatResponse(
                 reply=reply_content,
                 tool_calls=[AgentToolCall(name="plant_image_detect_tool")],
+                plant_id=saved_plant_data.get("plant_id") if saved_plant_data else None,
             )
 
         known_intent_response = self._local_known_intent_response(message, db, user_id, language)
@@ -739,7 +866,6 @@ class LangGraphChatAgent:
             response_messages = self._invoke_graph(
                 message,
                 thread_id=thread_id,
-                resume_interrupt=resume_interrupt,
                 language=language,
                 db=db,
                 user_id=user_id,

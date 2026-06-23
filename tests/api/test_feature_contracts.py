@@ -20,7 +20,7 @@ def test_feature_crud_contracts(client: TestClient) -> None:
 
     action_type_response = client.post(
         "/api/v1/action-types",
-        json={"name": "Watering", "icon": "water", "color": "#00AEEF"},
+        json={"name": "Contract Watering", "icon": "water", "color": "#00AEEF"},
         headers=headers,
     )
     assert action_type_response.status_code == 201
@@ -220,7 +220,7 @@ def test_schedule_recurrence_and_completion_filters(client: TestClient) -> None:
 
     action_type_response = client.post(
         "/api/v1/action-types",
-        json={"name": "Prune", "icon": "prune", "color": "#FEB05D"},
+        json={"name": "Contract Prune", "icon": "prune", "color": "#FEB05D"},
         headers=headers,
     )
     assert action_type_response.status_code == 201

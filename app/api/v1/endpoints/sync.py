@@ -31,6 +31,7 @@ from app.schemas.note import NoteCreate, NoteUpdate
 from app.schemas.schedule import ScheduleCreate, ScheduleUpdate
 from app.schemas.task_completion import TaskCompletionCreate, TaskCompletionUpdate
 from app.schemas.action_type import ActionTypeCreate, ActionTypeUpdate
+from app.services.user_defaults import ensure_user_defaults
 
 router = APIRouter()
 
@@ -271,7 +272,12 @@ def get_sync_capabilities(_: User = Depends(get_current_user)) -> SyncCapabiliti
 
 
 @router.get("/bootstrap", response_model=SyncBootstrapResponse)
-def bootstrap_sync(current_user: User = Depends(get_current_user)) -> SyncBootstrapResponse:
+def bootstrap_sync(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> SyncBootstrapResponse:
+    if ensure_user_defaults(db, current_user.id):
+        db.commit()
     return SyncBootstrapResponse(
         server_time=datetime.now(timezone.utc),
         user_id=current_user.id,

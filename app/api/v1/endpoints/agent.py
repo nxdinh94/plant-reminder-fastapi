@@ -60,36 +60,37 @@ def chat_with_agent(
     try:
         if payload.image_base64:
             logger.info(
-                "Agent chat request body: message=%r image_base64_len=%d image_base64_preview=%r thread_id=%r resume_interrupt=%s",
+                "Agent chat request body: message=%r image_base64_len=%d image_base64_preview=%r thread_id=%r",
                 payload.message,
                 len(payload.image_base64),
                 payload.image_base64[:200],
                 payload.thread_id,
-                payload.resume_interrupt,
             )
         else:
             logger.info(
-                "Agent chat request body: message=%r image_base64=None thread_id=%r resume_interrupt=%s",
+                "Agent chat request body: message=%r image_base64=None thread_id=%r",
                 payload.message,
                 payload.thread_id,
-                payload.resume_interrupt,
             )
 
         thread_id = payload.thread_id or str(uuid.uuid4())
-        try:
-            message_created_at = datetime.now(timezone.utc)
-            user_message = ChatMessage(
-                user_id=current_user.id,
-                thread_id=thread_id,
-                role="user",
-                content=payload.message,
-                created_at=message_created_at,
-            )
-            db.add(user_message)
-            db.commit()
-        except ProgrammingError:
-            db.rollback()
-            logger.exception("chat history persistence failed for user message; continuing without persistence")
+
+        # Persist user message (skip if empty image-only message)
+        if payload.message.strip():
+            try:
+                message_created_at = datetime.now(timezone.utc)
+                user_message = ChatMessage(
+                    user_id=current_user.id,
+                    thread_id=thread_id,
+                    role="user",
+                    content=payload.message,
+                    created_at=message_created_at,
+                )
+                db.add(user_message)
+                db.commit()
+            except ProgrammingError:
+                db.rollback()
+                logger.exception("chat history persistence failed for user message; continuing without persistence")
 
         accept_language = request.headers.get("accept-language", "en")
         language = "vi" if "vi" in accept_language.lower() else "en"
@@ -98,7 +99,6 @@ def chat_with_agent(
             payload.message,
             image_base64=payload.image_base64,
             thread_id=thread_id,
-            resume_interrupt=payload.resume_interrupt,
             language=language,
             db=db,
             user_id=str(current_user.id),
@@ -133,7 +133,7 @@ def chat_with_agent(
             api_name="chat",
             request=request,
             user_id=str(current_user.id),
-            extra=f"thread_id={payload.thread_id!r} resume_interrupt={payload.resume_interrupt}",
+            extra=f"thread_id={payload.thread_id!r}",
         )
         raise
 
@@ -200,6 +200,7 @@ def analyze_plant_image(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> PlantImageAnalyzeResponse:
+    """Used by the manual 'Add Plant' creation flow (is_manual_creation=True). Not used by the chatbot."""
     user_id = str(current_user.id)
     try:
         preview = payload.image_base64[:200]
@@ -239,6 +240,7 @@ def apply_plant_decision(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> PlantDecisionResponse:
+    """Used by the manual 'Add Plant' creation flow. Not used by the chatbot."""
     try:
         accept_language = request.headers.get("accept-language", "en")
         language = "vi" if "vi" in accept_language.lower() else "en"

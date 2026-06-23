@@ -4,7 +4,7 @@ from datetime import datetime
 
 
 class AgentChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=1000)
+    message: str = Field(default="", min_length=0, max_length=1000)
     image_base64: str | None = Field(default=None, min_length=20)
     thread_id: str | None = Field(default=None, min_length=1, max_length=200)
     resume_interrupt: bool = False
@@ -18,6 +18,7 @@ class AgentChatResponse(BaseModel):
     reply: str
     tool_calls: list[AgentToolCall] = Field(default_factory=list)
     thread_id: str | None = None
+    plant_id: str | None = None
 
 
 class ChatHistoryItem(BaseModel):

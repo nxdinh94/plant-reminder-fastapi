@@ -19,6 +19,7 @@ from app.schemas.auth import (
     RegisterRequest,
     TokenResponse,
 )
+from app.services.user_defaults import ensure_user_defaults
 
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -39,6 +40,8 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> TokenRe
 
     user = User(email=payload.email, password_hash=hash_password(payload.password))
     db.add(user)
+    db.flush()
+    ensure_user_defaults(db, user.id)
     db.commit()
     db.refresh(user)
     return _issue_tokens(user.id)
@@ -51,6 +54,8 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)) -> TokenResponse
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User is disabled")
+    if ensure_user_defaults(db, user.id):
+        db.commit()
     return _issue_tokens(user.id)
 
 
@@ -69,6 +74,8 @@ def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenResp
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
+    if ensure_user_defaults(db, user.id):
+        db.commit()
     return _issue_tokens(user.id)
 
 

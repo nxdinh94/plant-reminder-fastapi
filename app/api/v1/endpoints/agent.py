@@ -95,6 +95,9 @@ def chat_with_agent(
         accept_language = request.headers.get("accept-language", "en")
         language = "vi" if "vi" in accept_language.lower() else "en"
 
+        timezone_str = request.headers.get("time-zone", "UTC")
+        local_time_str = request.headers.get("local-time", None)
+
         response = agent.chat(
             payload.message,
             image_base64=payload.image_base64,
@@ -102,6 +105,8 @@ def chat_with_agent(
             language=language,
             db=db,
             user_id=str(current_user.id),
+            timezone=timezone_str,
+            local_time=local_time_str,
         )
         response.thread_id = thread_id
         tool_call_names = [tool_call.name for tool_call in response.tool_calls]
@@ -305,8 +310,17 @@ async def chat_with_agent_stream(
     _: User = Depends(get_current_user),
 ) -> StreamingResponse:
     try:
+        accept_language = request.headers.get("accept-language", "en")
+        language = "vi" if "vi" in accept_language.lower() else "en"
+        timezone_str = request.headers.get("time-zone", "UTC")
+        local_time_str = request.headers.get("local-time", None)
         return StreamingResponse(
-            agent.chat_stream(payload.message),
+            agent.chat_stream(
+                payload.message,
+                language=language,
+                timezone=timezone_str,
+                local_time=local_time_str,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )

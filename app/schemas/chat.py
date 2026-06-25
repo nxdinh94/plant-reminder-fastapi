@@ -19,6 +19,7 @@ class AgentChatResponse(BaseModel):
     tool_calls: list[AgentToolCall] = Field(default_factory=list)
     thread_id: str | None = None
     plant_id: str | None = None
+    schedule_id: str | None = None
 
 
 class ChatHistoryItem(BaseModel):

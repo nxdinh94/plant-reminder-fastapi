@@ -34,8 +34,10 @@ except ModuleNotFoundError:
 
 from app.agent_tools.small_talk import generate_small_talk_response, small_talk_tool
 from app.agent_tools.user_insights import (
+    _last_interacted_schedule_id,
     get_user_journal_insight_payload,
     get_user_plant_insight_payload,
+    manage_plant_schedules_tool,
     reset_user_insight_context,
     set_user_insight_context,
     users_journal_insight_tool,
@@ -69,11 +71,12 @@ SYSTEM_PROMPT = f"""\
 You are a friendly Plant Reminder assistant.
 Keep answers concise and clear.
 Use small_talk_tool when a message is greeting/chitchat/thanks/bye/how-are-you.
-Use users_plant_insight_tool only for saved plant/library/profile/care-field/schedule/task-completion questions, including relative dates such as today, yesterday, or tomorrow when the user asks about plant tasks.
+Use manage_plant_schedules_tool when the user wants to create, read/view, update/edit, or delete/remove a scheduled task or care reminder (such as watering, fertilizing, repotting, pruning, misting) for their plant.
+Use users_plant_insight_tool only for general saved plant/library/profile/care-field/schedule/task-completion questions, including relative dates such as today, yesterday, or tomorrow when the user asks about plant tasks.
 Use users_journal_insight_tool only for journal, note, log, history, progress, symptoms-over-time, or what-the-user-recorded questions.
 If wording is ambiguous like "my plant" and does not mention journal/history/notes/logs, choose users_plant_insight_tool only.
 Do not call both plant and journal insight tools unless the user explicitly asks for both saved plant profile details and journal history.
-If the user asks beyond current capability, clearly say you currently support small talk, plant image analysis, saved plant insight, and journal insight.
+If the user asks beyond current capability, clearly say you currently support small talk, plant image analysis, saved plant insight, journal insight, and managing plant reminders/schedules.
 
 Reference document context:
 {OPENROUTER_QUICKSTART_CONTEXT}
@@ -199,6 +202,65 @@ class LangGraphChatAgent:
             )
         self._graph = self._build_graph() if self._llm_enabled else None
 
+    def _get_system_prompt(self, language: str = "vi", timezone: str = "UTC", local_time: str | None = None) -> str:
+        from datetime import datetime, timedelta, timezone as datetime_timezone
+        import zoneinfo
+
+        today_str = None
+        current_time_str = None
+
+        if local_time:
+            try:
+                dt = datetime.fromisoformat(local_time.replace(" ", "T"))
+                today_str = dt.date().isoformat()
+                current_time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+
+        if not today_str and timezone:
+            try:
+                tz = zoneinfo.ZoneInfo(timezone)
+                dt = datetime.now(tz)
+                today_str = dt.date().isoformat()
+                current_time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                offset_match = re.fullmatch(
+                    r"(?:(?:GMT|UTC)\s*)?([+-])(\d{1,2})(?::?(\d{2}))?",
+                    timezone.strip(),
+                    re.IGNORECASE,
+                )
+                if offset_match:
+                    sign, hours_raw, minutes_raw = offset_match.groups()
+                    hours = int(hours_raw)
+                    minutes = int(minutes_raw or "0")
+                    if hours <= 23 and minutes <= 59:
+                        delta = timedelta(hours=hours, minutes=minutes)
+                        if sign == "-":
+                            delta = -delta
+                        dt = datetime.now(datetime_timezone(delta))
+                        today_str = dt.date().isoformat()
+                        current_time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+
+        if not today_str:
+            from datetime import date
+            today_str = date.today().isoformat()
+            current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        try:
+            dt = datetime.fromisoformat(today_str)
+            day_of_week = dt.strftime("%A")
+        except Exception:
+            day_of_week = "unknown"
+
+        lang_instruction = "Response MUST be in Vietnamese language." if language == "vi" else "Response MUST be in English language."
+        date_context = (
+            f"The user's current local date is {today_str} ({day_of_week}) "
+            f"and current local time is {current_time_str}. Timezone: {timezone}. "
+            "This current date/time context supersedes any older date/time context in prior "
+            "thread messages; use it for all relative dates and schedule creation."
+        )
+        return f"{SYSTEM_PROMPT}\n\n{date_context}\n{lang_instruction}"
+
     def close_pool(self) -> None:
         if hasattr(self, "_pool") and self._pool is not None:
             try:
@@ -212,6 +274,7 @@ class LangGraphChatAgent:
             small_talk_tool,
             users_plant_insight_tool,
             users_journal_insight_tool,
+            manage_plant_schedules_tool,
         ]
 
         self._llm = init_chat_model(
@@ -394,9 +457,59 @@ class LangGraphChatAgent:
         )
 
     @staticmethod
+    def _is_schedule_management_request(message: str) -> bool:
+        normalized = message.strip().lower()
+        if not normalized:
+            return False
+
+        schedule_terms = (
+            "schedule",
+            "schedules",
+            "reminder",
+            "reminders",
+            "task",
+            "tasks",
+            "water",
+            "watering",
+            "fertilize",
+            "fertilizing",
+            "repot",
+            "repotting",
+            "prune",
+            "pruning",
+            "mist",
+            "misting",
+        )
+        mutation_terms = (
+            "create",
+            "add",
+            "set",
+            "make",
+            "remind me",
+            "update",
+            "edit",
+            "change",
+            "delete",
+            "remove",
+            "cancel",
+        )
+        schedule_as_verb = re.search(
+            r"\bschedule\s+(?:a|an|my|the)?\s*"
+            r"(?:water|watering|fertiliz|repot|prun|mist|reminder|task)",
+            normalized,
+        )
+        return (
+            any(term in normalized for term in schedule_terms)
+            and (any(term in normalized for term in mutation_terms) or schedule_as_verb is not None)
+        )
+
+    @staticmethod
     def _classify_user_insight_request(message: str) -> str | None:
         normalized = message.strip().lower()
         if not normalized:
+            return None
+
+        if LangGraphChatAgent._is_schedule_management_request(normalized):
             return None
 
         journal_keywords = (
@@ -666,10 +779,7 @@ class LangGraphChatAgent:
 
         new_messages = []
         if not has_history:
-            sys_prompt = SYSTEM_PROMPT + (
-                "\nResponse MUST be in Vietnamese language." if language == "vi"
-                else "\nResponse MUST be in English language."
-            )
+            sys_prompt = self._get_system_prompt(language)
             new_messages.append(SystemMessage(content=sys_prompt))
         else:
             new_messages.append(SystemMessage(
@@ -742,6 +852,8 @@ class LangGraphChatAgent:
         language: str = "vi",
         db: Session | None = None,
         user_id: str | None = None,
+        timezone: str = "UTC",
+        local_time: str | None = None,
     ) -> AgentChatResponse:
         if image_base64 and thread_id:
             self._last_uploaded_image[thread_id] = image_base64
@@ -869,6 +981,8 @@ class LangGraphChatAgent:
                 language=language,
                 db=db,
                 user_id=user_id,
+                timezone=timezone,
+                local_time=local_time,
             )
         except Exception:
             fallback_response = self._fallback_user_insight_response(message, db, user_id)
@@ -878,7 +992,8 @@ class LangGraphChatAgent:
             raise
         reply = self._extract_final_reply(response_messages)
         tool_calls = self._extract_tool_calls(response_messages)
-        return AgentChatResponse(reply=reply, tool_calls=tool_calls)
+        sched_id = _last_interacted_schedule_id.get()
+        return AgentChatResponse(reply=reply, tool_calls=tool_calls, schedule_id=sched_id)
 
     def _save_both_histories(
         self,
@@ -926,7 +1041,7 @@ class LangGraphChatAgent:
 
             new_messages = []
             if not has_history:
-                sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
+                sys_prompt = self._get_system_prompt(language)
                 new_messages.append(SystemMessage(content=sys_prompt))
             else:
                 new_messages.append(SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."))
@@ -1555,7 +1670,13 @@ class LangGraphChatAgent:
             ),
         )
 
-    async def chat_stream(self, message: str) -> AsyncIterator[str]:
+    async def chat_stream(
+        self,
+        message: str,
+        language: str = "vi",
+        timezone: str = "UTC",
+        local_time: str | None = None,
+    ) -> AsyncIterator[str]:
         if not self._llm_enabled or self._llm is None:
             fallback_reply = generate_small_talk_response(message)
             yield self._sse("chunk", fallback_reply)
@@ -1565,7 +1686,7 @@ class LangGraphChatAgent:
         full_reply = ""
         async for chunk in self._llm.astream(
             [
-                SystemMessage(content=SYSTEM_PROMPT),
+                SystemMessage(content=self._get_system_prompt(language, timezone, local_time)),
                 HumanMessage(content=message),
             ]
         ):
@@ -1585,18 +1706,27 @@ class LangGraphChatAgent:
         language: str = "vi",
         db: Session | None = None,
         user_id: str | None = None,
+        timezone: str = "UTC",
+        local_time: str | None = None,
     ) -> Sequence[BaseMessage]:
         if self._graph is None:
             return [AIMessage(content=generate_small_talk_response(message))]
 
         db_token = None
         user_id_token = None
+        schedule_id_token = None
+        tz_token = None
+        lt_token = None
         if db is not None and user_id:
             db_token, user_id_token = set_user_insight_context(db, user_id)
+            from app.agent_tools.user_insights import _user_timezone, _user_local_time
+            tz_token = _user_timezone.set(timezone)
+            lt_token = _user_local_time.set(local_time)
+            schedule_id_token = _last_interacted_schedule_id.set(None)
 
         state: dict[str, Any]
         try:
-            sys_prompt = SYSTEM_PROMPT + ("\nResponse MUST be in Vietnamese language." if language == "vi" else "\nResponse MUST be in English language.")
+            sys_prompt = self._get_system_prompt(language, timezone, local_time)
             if thread_id is None:
                 state = self._graph.invoke(
                     {
@@ -1647,12 +1777,13 @@ class LangGraphChatAgent:
                     config=config,
                 )
             else:
-                # Subsequent messages: append the human message and instruct language
+                # Subsequent messages still need fresh date/time context; persisted threads
+                # may contain stale system prompts from earlier days.
                 state = self._graph.invoke(
                     {
                         "messages": [
                             HumanMessage(content=message),
-                            SystemMessage(content="Respond in Vietnamese language." if language == "vi" else "Respond in English language."),
+                            SystemMessage(content=sys_prompt),
                         ]
                     },
                     config=config,
@@ -1663,6 +1794,13 @@ class LangGraphChatAgent:
         finally:
             if db_token is not None and user_id_token is not None:
                 reset_user_insight_context(db_token, user_id_token)
+                from app.agent_tools.user_insights import _user_timezone, _user_local_time
+                if tz_token is not None:
+                    _user_timezone.reset(tz_token)
+                if lt_token is not None:
+                    _user_local_time.reset(lt_token)
+            if schedule_id_token is not None:
+                _last_interacted_schedule_id.reset(schedule_id_token)
 
     def _thread_has_pending_interrupt(self, config: dict[str, dict[str, str]]) -> bool:
         if self._graph is None:

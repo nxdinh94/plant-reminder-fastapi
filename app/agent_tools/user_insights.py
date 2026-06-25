@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import re
+import zoneinfo
 from contextvars import ContextVar, Token
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 from langchain_core.tools import tool
@@ -19,6 +20,9 @@ from app.models.task_completion import TaskCompletion
 
 _current_db: ContextVar[Session | None] = ContextVar("user_insights_db", default=None)
 _current_user_id: ContextVar[str | None] = ContextVar("user_insights_user_id", default=None)
+_last_interacted_schedule_id: ContextVar[str | None] = ContextVar("last_interacted_schedule_id", default=None)
+_user_timezone: ContextVar[str] = ContextVar("user_timezone", default="UTC")
+_user_local_time: ContextVar[str | None] = ContextVar("user_local_time", default=None)
 
 
 def set_user_insight_context(db: Session, user_id: str) -> tuple[Token[Session | None], Token[str | None]]:
@@ -45,6 +49,41 @@ def _context_or_error() -> tuple[Session | None, str | None, str | None]:
     if db is None or not user_id:
         return None, None, "User insight context is unavailable for this request."
     return db, user_id, None
+
+
+def _timezone_from_context(timezone_value: str | None) -> timezone | zoneinfo.ZoneInfo:
+    if not timezone_value:
+        return timezone.utc
+
+    normalized = timezone_value.strip()
+    if normalized.upper() in {"UTC", "GMT", "Z"}:
+        return timezone.utc
+
+    offset_match = re.fullmatch(
+        r"(?:(?:GMT|UTC)\s*)?([+-])(\d{1,2})(?::?(\d{2}))?",
+        normalized,
+        re.IGNORECASE,
+    )
+    if offset_match:
+        sign, hours_raw, minutes_raw = offset_match.groups()
+        hours = int(hours_raw)
+        minutes = int(minutes_raw or "0")
+        if hours <= 23 and minutes <= 59:
+            delta = timedelta(hours=hours, minutes=minutes)
+            if sign == "-":
+                delta = -delta
+            return timezone(delta)
+
+    try:
+        return zoneinfo.ZoneInfo(normalized)
+    except Exception:
+        return timezone.utc
+
+
+def _local_schedule_datetime_as_utc(local_date: date, local_time: time) -> datetime:
+    user_tz = _timezone_from_context(_user_timezone.get())
+    local_dt = datetime.combine(local_date, local_time).replace(tzinfo=user_tz)
+    return local_dt.astimezone(timezone.utc)
 
 
 def _coerce_query(query: Any) -> str:
@@ -571,3 +610,414 @@ def users_plant_insight_tool(query: Any = "", limit: Any = 50) -> str:
 def users_journal_insight_tool(query: Any = "", limit: Any = 8) -> str:
     """Use only when the user asks about their own plant journal entries, notes, logs, observations, symptoms over time, progress history, or what they recorded. Do not use for general saved plant profile or care-field questions unless the user explicitly asks from journal history."""
     return dump_tool_payload(get_user_journal_insight_payload(query=query, limit=limit))
+
+
+@tool("manage_plant_schedules_tool")
+def manage_plant_schedules_tool(
+    action: str,
+    plant_name: str,
+    action_type_name: str | None = None,
+    frequency_type: str | None = None,
+    frequency_days: int | None = None,
+    days_of_week: list[str] | None = None,
+    scheduled_time: str | None = None,
+    note: str | None = None,
+    start_date: str | None = None,
+    schedule_id: str | None = None,
+) -> str:
+    """Perform CRUD (Create, Read, Update, Delete) operations on scheduled tasks / care reminders for the user's plants.
+    
+    Arguments:
+    - action: The CRUD action to perform. One of: "create", "read", "update", "delete".
+    - plant_name: The name of the plant (e.g. "Peace Lily", "abc plant"). We will find the plant by this name. If the user doesn't own this plant, a friendly error message is returned.
+    - action_type_name: The name of the action/task (e.g. "Water", "Fertilize", "Repot", "Prune"). Case-insensitive. Required for "create".
+    - frequency_type: The frequency type. One of: "INTERVAL" (for repeating every X days) or "SPECIFIC_DAYS" (for specific days of the week). Defaults to "INTERVAL" if not specified.
+    - frequency_days: Number of days between tasks (e.g., 3 for every 3 days). Only used when frequency_type is "INTERVAL". Defaults to 7 for water, 14 for fertilize, 30 for prune, 365 for repot.
+    - days_of_week: List of days of week (e.g. ["Monday", "Wednesday"]) when frequency_type is "SPECIFIC_DAYS".
+    - scheduled_time: Time of day in 24-hour format "HH:MM" (e.g., "15:00" for 3 PM, "09:00" for 9 AM). Defaults to "09:00" if not specified.
+    - note: Optional text note/instruction for this schedule.
+    - start_date: Date to start the schedule in "YYYY-MM-DD" format. Defaults to today's date if not specified.
+    - schedule_id: The ID of the schedule. Required for "update" and "delete" operations if multiple schedules exist, or to identify a specific schedule.
+    """
+    from datetime import time, timezone
+    from sqlalchemy import func
+    from app.api.v1.endpoints.common import bump_version, soft_delete
+
+    db, user_id, error = _context_or_error()
+    if error is not None:
+        return dump_tool_payload({"status": "error", "message": error})
+
+    assert db is not None and user_id is not None
+
+    # Clean the query plant name
+    clean_query_name = plant_name.strip().lower()
+    # Strip common prefixes/suffixes like "my", "plant", "cây" to match robustly
+    for word in ["my", "plant", "cây"]:
+        if clean_query_name.startswith(word + " "):
+            clean_query_name = clean_query_name[len(word)+1:].strip()
+        if clean_query_name.endswith(" " + word):
+            clean_query_name = clean_query_name[:-len(word)-1].strip()
+
+    # Query all active plants of the user
+    all_plants = list(db.execute(
+        select(Plant).where(
+            Plant.user_id == user_id,
+            Plant.deleted_at.is_(None)
+        )
+    ).scalars())
+
+    matched_plant = None
+    # 1. Try exact match first
+    for p in all_plants:
+        if p.name.strip().lower() == plant_name.strip().lower():
+            matched_plant = p
+            break
+
+    # 2. Try match against cleaned query name
+    if not matched_plant:
+        for p in all_plants:
+            p_name_clean = p.name.strip().lower()
+            if p_name_clean == clean_query_name:
+                matched_plant = p
+                break
+
+    # 3. Try substring match
+    if not matched_plant:
+        for p in all_plants:
+            p_name_clean = p.name.strip().lower()
+            if clean_query_name in p_name_clean or p_name_clean in clean_query_name:
+                matched_plant = p
+                break
+
+    # If plant is not found, return friendly error message (dont hardcode plant name)
+    if not matched_plant:
+        return dump_tool_payload({
+            "status": "error",
+            "message": f"I couldn't find a plant named '{plant_name}' in your library. Please make sure you have added it first."
+        })
+
+    act = action.strip().lower()
+
+    if act == "create":
+        if not action_type_name:
+            return dump_tool_payload({"status": "error", "message": "action_type_name is required to create a schedule."})
+
+        # Map action name to a standardized Title Case name
+        clean_action = action_type_name.strip().lower()
+        if "water" in clean_action or "tưới" in clean_action:
+            display_name = "Watering"
+            default_icon = "water_droplet"
+            default_color = "#2196F3"
+        elif "fertiliz" in clean_action or "bón phân" in clean_action:
+            display_name = "Fertilize"
+            default_icon = "fertilize"
+            default_color = "#4CAF50"
+        elif "repot" in clean_action or "thay chậu" in clean_action:
+            display_name = "Repot"
+            default_icon = "repot"
+            default_color = "#8B4513"
+        elif "prune" in clean_action or "trim" in clean_action or "cắt tỉa" in clean_action:
+            display_name = "Prune"
+            default_icon = "prune"
+            default_color = "#FF9800"
+        elif "mist" in clean_action or "phun sương" in clean_action:
+            display_name = "Mist"
+            default_icon = "mist"
+            default_color = "#00BCD4"
+        else:
+            display_name = action_type_name.strip().capitalize()
+            default_icon = "water_droplet"
+            default_color = "#9C27B0"
+
+        # Find or create ActionType
+        action_type_stmt = select(ActionType).where(
+            ActionType.user_id == user_id,
+            ActionType.deleted_at.is_(None),
+            func.lower(ActionType.name) == display_name.lower()
+        )
+        action_type = db.execute(action_type_stmt).scalar_one_or_none()
+
+        if not action_type:
+            action_type = ActionType(
+                user_id=user_id,
+                name=display_name,
+                icon=default_icon,
+                color=default_color
+            )
+            db.add(action_type)
+            db.flush()
+
+        # Parse schedule configurations
+        freq_type = (frequency_type or "INTERVAL").upper()
+        freq_days = frequency_days
+        if freq_type == "INTERVAL" and freq_days is None:
+            # Smart defaults based on task type
+            if "water" in display_name.lower():
+                freq_days = 7
+            elif "fertiliz" in display_name.lower():
+                freq_days = 14
+            elif "repot" in display_name.lower():
+                freq_days = 365
+            elif "prune" in display_name.lower():
+                freq_days = 30
+            else:
+                freq_days = 7
+
+        parsed_time = time(9, 0)
+        if scheduled_time:
+            time_match = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", scheduled_time.strip())
+            if time_match:
+                hours = int(time_match.group(1))
+                minutes = int(time_match.group(2))
+                seconds = int(time_match.group(3)) if time_match.group(3) else 0
+                parsed_time = time(hours, minutes, seconds)
+
+        # Resolve user's local date
+        from app.agent_tools.user_insights import _user_local_time, _user_timezone
+        user_date = None
+        local_time_val = _user_local_time.get()
+        timezone_val = _user_timezone.get()
+
+        if local_time_val:
+            try:
+                dt = datetime.fromisoformat(local_time_val.replace(" ", "T"))
+                user_date = dt.date()
+            except Exception:
+                pass
+
+        if not user_date and timezone_val:
+            try:
+                tz = _timezone_from_context(timezone_val)
+                user_date = datetime.now(tz).date()
+            except Exception:
+                pass
+
+        if not user_date:
+            user_date = date.today()
+
+        parsed_start_date = user_date
+        if start_date:
+            try:
+                parsed_start_date = date.fromisoformat(start_date.strip())
+            except ValueError:
+                pass
+
+        next_due_datetime = _local_schedule_datetime_as_utc(parsed_start_date, parsed_time)
+
+        schedule = Schedule(
+            user_id=user_id,
+            plant_id=matched_plant.id,
+            action_type_id=action_type.id,
+            frequency_type=freq_type,
+            frequency_days=freq_days,
+            days_of_week=days_of_week,
+            scheduled_time=parsed_time,
+            note=note,
+            start_date=parsed_start_date,
+            next_due_at=next_due_datetime
+        )
+        db.add(schedule)
+        db.commit()
+        db.refresh(schedule)
+
+        _last_interacted_schedule_id.set(schedule.id)
+
+        return dump_tool_payload({
+            "status": "ok",
+            "message": f"Successfully created {display_name} reminder for '{matched_plant.name}' starting {parsed_start_date} at {parsed_time}.",
+            "schedule_id": schedule.id,
+            "plant_name": matched_plant.name
+        })
+
+    elif act == "read":
+        schedules_stmt = select(Schedule).where(
+            Schedule.user_id == user_id,
+            Schedule.plant_id == matched_plant.id,
+            Schedule.deleted_at.is_(None)
+        ).order_by(Schedule.next_due_at.asc())
+        schedules = list(db.execute(schedules_stmt).scalars())
+
+        items = []
+        for s in schedules:
+            act_type = db.execute(select(ActionType).where(ActionType.id == s.action_type_id)).scalar_one_or_none()
+            items.append({
+                "id": s.id,
+                "action_type_name": act_type.name if act_type else "Unknown",
+                "frequency_type": s.frequency_type,
+                "frequency_days": s.frequency_days,
+                "days_of_week": s.days_of_week,
+                "scheduled_time": str(s.scheduled_time),
+                "next_due_at": s.next_due_at,
+                "note": s.note
+            })
+
+        if items:
+            _last_interacted_schedule_id.set(items[0]["id"])
+
+        return dump_tool_payload({
+            "status": "ok",
+            "plant_name": matched_plant.name,
+            "schedules": items
+        })
+
+    elif act == "update":
+        schedule = None
+        if schedule_id:
+            schedule = db.execute(
+                select(Schedule).where(
+                    Schedule.id == schedule_id,
+                    Schedule.user_id == user_id,
+                    Schedule.deleted_at.is_(None)
+                )
+            ).scalar_one_or_none()
+        else:
+            if action_type_name:
+                # Find matching action type
+                act_stmt = select(ActionType).where(
+                    ActionType.user_id == user_id,
+                    ActionType.deleted_at.is_(None),
+                    func.lower(ActionType.name) == action_type_name.strip().lower()
+                )
+                action_type = db.execute(act_stmt).scalar_one_or_none()
+                if action_type:
+                    schedule = db.execute(
+                        select(Schedule).where(
+                            Schedule.plant_id == matched_plant.id,
+                            Schedule.action_type_id == action_type.id,
+                            Schedule.deleted_at.is_(None)
+                        )
+                    ).scalar_one_or_none()
+
+            if not schedule:
+                schedules = list(db.execute(
+                    select(Schedule).where(
+                        Schedule.plant_id == matched_plant.id,
+                        Schedule.deleted_at.is_(None)
+                    )
+                ).scalars())
+                if len(schedules) == 1:
+                    schedule = schedules[0]
+                elif len(schedules) > 1:
+                    return dump_tool_payload({
+                        "status": "ambiguous",
+                        "message": f"Multiple schedules found for '{matched_plant.name}'. Please specify which one to update.",
+                        "items": [
+                            {
+                                "id": s.id,
+                                "action_type": db.execute(select(ActionType.name).where(ActionType.id == s.action_type_id)).scalar(),
+                                "scheduled_time": str(s.scheduled_time)
+                            }
+                            for s in schedules
+                        ]
+                    })
+
+        if not schedule:
+            return dump_tool_payload({"status": "error", "message": f"No schedule found to update for plant '{matched_plant.name}'."})
+
+        # Apply updates
+        if frequency_type:
+            schedule.frequency_type = frequency_type.upper()
+        if frequency_days is not None:
+            schedule.frequency_days = frequency_days
+        if days_of_week is not None:
+            schedule.days_of_week = days_of_week
+        if scheduled_time:
+            time_match = re.match(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$", scheduled_time.strip())
+            if time_match:
+                hours = int(time_match.group(1))
+                minutes = int(time_match.group(2))
+                seconds = int(time_match.group(3)) if time_match.group(3) else 0
+                schedule.scheduled_time = time(hours, minutes, seconds)
+        if note is not None:
+            schedule.note = note
+        if start_date:
+            try:
+                schedule.start_date = date.fromisoformat(start_date.strip())
+            except ValueError:
+                pass
+
+        # Recalculate next_due_at
+        ref_date = schedule.start_date or date.today()
+        ref_time = schedule.scheduled_time or time(9, 0)
+        schedule.next_due_at = _local_schedule_datetime_as_utc(ref_date, ref_time)
+
+        bump_version(schedule)
+        db.commit()
+        db.refresh(schedule)
+
+        _last_interacted_schedule_id.set(schedule.id)
+
+        return dump_tool_payload({
+            "status": "ok",
+            "message": f"Successfully updated schedule for '{matched_plant.name}'.",
+            "schedule_id": schedule.id,
+            "plant_name": matched_plant.name
+        })
+
+    elif act == "delete":
+        schedule = None
+        if schedule_id:
+            schedule = db.execute(
+                select(Schedule).where(
+                    Schedule.id == schedule_id,
+                    Schedule.user_id == user_id,
+                    Schedule.deleted_at.is_(None)
+                )
+            ).scalar_one_or_none()
+        else:
+            if action_type_name:
+                act_stmt = select(ActionType).where(
+                    ActionType.user_id == user_id,
+                    ActionType.deleted_at.is_(None),
+                    func.lower(ActionType.name) == action_type_name.strip().lower()
+                )
+                action_type = db.execute(act_stmt).scalar_one_or_none()
+                if action_type:
+                    schedule = db.execute(
+                        select(Schedule).where(
+                            Schedule.plant_id == matched_plant.id,
+                            Schedule.action_type_id == action_type.id,
+                            Schedule.deleted_at.is_(None)
+                        )
+                    ).scalar_one_or_none()
+
+            if not schedule:
+                schedules = list(db.execute(
+                    select(Schedule).where(
+                        Schedule.plant_id == matched_plant.id,
+                        Schedule.deleted_at.is_(None)
+                    )
+                ).scalars())
+                if len(schedules) == 1:
+                    schedule = schedules[0]
+                elif len(schedules) > 1:
+                    return dump_tool_payload({
+                        "status": "ambiguous",
+                        "message": f"Multiple schedules found for '{matched_plant.name}'. Please specify which one to delete.",
+                        "items": [
+                            {
+                                "id": s.id,
+                                "action_type": db.execute(select(ActionType.name).where(ActionType.id == s.action_type_id)).scalar(),
+                                "scheduled_time": str(s.scheduled_time)
+                            }
+                            for s in schedules
+                        ]
+                    })
+
+        if not schedule:
+            return dump_tool_payload({"status": "error", "message": f"No schedule found to delete for plant '{matched_plant.name}'."})
+
+        soft_delete(schedule)
+        db.commit()
+
+        _last_interacted_schedule_id.set(schedule.id)
+
+        return dump_tool_payload({
+            "status": "ok",
+            "message": f"Successfully deleted schedule for '{matched_plant.name}'.",
+            "schedule_id": schedule.id,
+            "plant_name": matched_plant.name
+        })
+
+    else:
+        return dump_tool_payload({"status": "error", "message": f"Unsupported action '{action}'."})

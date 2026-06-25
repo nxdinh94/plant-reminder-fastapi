@@ -3,7 +3,7 @@ import logging
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from app.schemas.chat import PlantDetectionData
 import app.services.agent_chat as agent_chat_service
 from app.services.agent_chat import agent
@@ -137,6 +137,105 @@ def test_agent_chat_reports_only_current_turn_graph_tool_calls(client: TestClien
     payload = response.json()
     assert payload["reply"] == "Sure."
     assert payload["tool_calls"] == [{"name": "small_talk_tool"}]
+
+
+def test_agent_chat_existing_thread_includes_fresh_date_context() -> None:
+    previous_messages = [
+        SystemMessage(
+            content=(
+                "The user's current local date is 2025-05-15 (Thursday) "
+                "and current local time is 2025-05-15 09:00:00. Timezone: UTC."
+            )
+        ),
+        HumanMessage(content="old message"),
+        AIMessage(content="old reply"),
+    ]
+    invoke_calls = []
+
+    class ExistingThreadGraph:
+        def get_state(self, _config):
+            class Snapshot:
+                values = {"messages": previous_messages}
+                interrupts = []
+
+            return Snapshot()
+
+        def invoke(self, payload, **_kwargs):
+            invoke_calls.append(payload)
+            return {
+                "messages": previous_messages
+                + payload["messages"]
+                + [AIMessage(content="Done.")]
+            }
+
+    original_graph = agent._graph
+    agent._graph = ExistingThreadGraph()
+    try:
+        agent._invoke_graph(
+            message="write a short haiku about monsteras",
+            thread_id="stale_date_thread",
+            language="en",
+            timezone="GMT+07:00",
+            local_time="2026-06-25T14:30:00+07:00",
+        )
+    finally:
+        agent._graph = original_graph
+
+    assert invoke_calls
+    sent_messages = invoke_calls[0]["messages"]
+    assert isinstance(sent_messages[-1], SystemMessage)
+    assert "2026-06-25" in sent_messages[-1].content
+    assert "GMT+07:00" in sent_messages[-1].content
+    assert "supersedes any older date/time context" in sent_messages[-1].content
+    assert "2025-05-15" not in sent_messages[-1].content
+
+
+def test_schedule_management_request_reaches_langgraph(client: TestClient) -> None:
+    headers = register_and_auth_headers(client, "agent-schedule-routing@example.com")
+    invoke_calls = []
+
+    class ScheduleRequestGraph:
+        def get_state(self, _config):
+            class Snapshot:
+                values = {}
+                interrupts = []
+
+            return Snapshot()
+
+        def invoke(self, payload, **_kwargs):
+            invoke_calls.append(payload)
+            return {"messages": payload["messages"] + [AIMessage(content="Scheduled.")]}
+
+    original_graph = agent._graph
+    original_llm_enabled = agent._llm_enabled
+    agent._graph = ScheduleRequestGraph()
+    agent._llm_enabled = True
+    try:
+        response = client.post(
+            "/api/v1/agent/chat",
+            json={
+                "message": "create a watering schedule tomorrow",
+                "thread_id": "schedule_routing_thread",
+            },
+            headers={
+                **headers,
+                "time-zone": "GMT+07:00",
+                "local-time": "2026-06-25T14:30:00+07:00",
+            },
+        )
+    finally:
+        agent._graph = original_graph
+        agent._llm_enabled = original_llm_enabled
+
+    assert response.status_code == 200
+    assert invoke_calls
+    payload = response.json()
+    assert payload["reply"] == "Scheduled."
+
+
+def test_read_only_schedule_request_can_use_plant_insight_shortcut() -> None:
+    assert agent._classify_user_insight_request("what watering schedule do I have?") == "plant"
+    assert agent._classify_user_insight_request("create a watering schedule tomorrow") is None
 
 
 def test_agent_chat_requires_auth(client: TestClient) -> None:

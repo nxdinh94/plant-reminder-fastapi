@@ -1,11 +1,13 @@
 from datetime import date, datetime, time, timezone
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.agent_tools.user_insights import (
+    _user_timezone,
     get_user_plant_insight_payload,
+    manage_plant_schedules_tool,
     reset_user_insight_context,
     set_user_insight_context,
     users_plant_insight_tool,
@@ -270,5 +272,158 @@ def test_plant_insight_parses_yesterday_and_reports_missed_tasks() -> None:
         assert completions_by_schedule[missed_schedule.id] == []
         assert len(completions_by_schedule[completed_schedule.id]) == 1
         assert completions_by_schedule[completed_schedule.id][0]["completion_date"] == yesterday
+    finally:
+        db.close()
+
+
+def test_manage_plant_schedules_tool_crud() -> None:
+    import json
+
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=Session)
+    db = session_factory()
+    try:
+        user_id = "user-1"
+        plant = Plant(user_id=user_id, name="My Rose", species="Rosa")
+        db.add(plant)
+        db.commit()
+        db.refresh(plant)
+
+        db_token, user_id_token = set_user_insight_context(db, user_id)
+        timezone_token = _user_timezone.set("GMT+07:00")
+        try:
+            # 1. Create schedule on plant
+            create_res = manage_plant_schedules_tool.invoke({
+                "action": "create",
+                "plant_name": "My Rose",
+                "action_type_name": "water",
+                "frequency_type": "INTERVAL",
+                "frequency_days": 3,
+                "scheduled_time": "09:30",
+                "start_date": "2026-06-26",
+                "note": "Water in afternoon"
+            })
+            create_payload = json.loads(create_res)
+            assert create_payload["status"] == "ok"
+            assert "Successfully" in create_payload["message"]
+            assert create_payload["plant_name"] == "My Rose"
+            sched_id = create_payload["schedule_id"]
+
+            # Verify schedule is in db and ActionType is created
+            schedule = db.execute(select(Schedule).where(Schedule.id == sched_id)).scalar_one_or_none()
+            assert schedule is not None
+            assert schedule.frequency_days == 3
+            assert schedule.scheduled_time == time(9, 30)
+            assert schedule.start_date == date(2026, 6, 26)
+            assert schedule.next_due_at == datetime(2026, 6, 26, 2, 30)
+            assert schedule.note == "Water in afternoon"
+
+            action_type = db.execute(select(ActionType).where(ActionType.id == schedule.action_type_id)).scalar_one_or_none()
+            assert action_type is not None
+            assert action_type.name == "Watering"
+            assert action_type.icon == "water_droplet"
+            assert action_type.color == "#2196F3"
+
+            # 2. Create schedule on non-existent plant (assert friendly message, not hardcoded)
+            fail_res = manage_plant_schedules_tool.invoke({
+                "action": "create",
+                "plant_name": "Nonexistent Orchid",
+                "action_type_name": "fertilize"
+            })
+            fail_payload = json.loads(fail_res)
+            assert fail_payload["status"] == "error"
+            assert "Nonexistent Orchid" in fail_payload["message"]
+            assert "couldn't find" in fail_payload["message"] or "cannot find" in fail_payload["message"].lower()
+
+            # 3. Read schedules
+            read_res = manage_plant_schedules_tool.invoke({
+                "action": "read",
+                "plant_name": "My Rose"
+            })
+            read_payload = json.loads(read_res)
+            assert read_payload["status"] == "ok"
+            assert len(read_payload["schedules"]) == 1
+            assert read_payload["schedules"][0]["id"] == sched_id
+
+            # 4. Update schedule
+            update_res = manage_plant_schedules_tool.invoke({
+                "action": "update",
+                "plant_name": "My Rose",
+                "schedule_id": sched_id,
+                "frequency_days": 5,
+                "scheduled_time": "10:45",
+                "start_date": "2026-06-27",
+            })
+            update_payload = json.loads(update_res)
+            assert update_payload["status"] == "ok"
+            
+            db.expire(schedule)
+            schedule = db.execute(select(Schedule).where(Schedule.id == sched_id)).scalar_one_or_none()
+            assert schedule.frequency_days == 5
+            assert schedule.scheduled_time == time(10, 45)
+            assert schedule.start_date == date(2026, 6, 27)
+            assert schedule.next_due_at == datetime(2026, 6, 27, 3, 45)
+
+            # 5. Delete schedule
+            delete_res = manage_plant_schedules_tool.invoke({
+                "action": "delete",
+                "plant_name": "My Rose",
+                "schedule_id": sched_id
+            })
+            delete_payload = json.loads(delete_res)
+            assert delete_payload["status"] == "ok"
+
+            db.expire(schedule)
+            schedule = db.execute(select(Schedule).where(Schedule.id == sched_id)).scalar_one_or_none()
+            assert schedule.deleted_at is not None
+        finally:
+            _user_timezone.reset(timezone_token)
+            reset_user_insight_context(db_token, user_id_token)
+    finally:
+        db.close()
+
+
+def test_manage_plant_schedules_tool_supports_iana_timezone_for_next_due_at() -> None:
+    import json
+
+    engine = create_engine(
+        "sqlite+pysqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(bind=engine)
+    session_factory = sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=Session)
+    db = session_factory()
+    try:
+        user_id = "user-1"
+        plant = Plant(user_id=user_id, name="Thai Basil", species="Ocimum basilicum")
+        db.add(plant)
+        db.commit()
+
+        db_token, user_id_token = set_user_insight_context(db, user_id)
+        timezone_token = _user_timezone.set("Asia/Bangkok")
+        try:
+            create_res = manage_plant_schedules_tool.invoke({
+                "action": "create",
+                "plant_name": "Thai Basil",
+                "action_type_name": "water",
+                "scheduled_time": "09:30",
+                "start_date": "2026-06-26",
+            })
+            create_payload = json.loads(create_res)
+            assert create_payload["status"] == "ok"
+
+            schedule = db.execute(
+                select(Schedule).where(Schedule.id == create_payload["schedule_id"])
+            ).scalar_one()
+            assert schedule.next_due_at == datetime(2026, 6, 26, 2, 30)
+        finally:
+            _user_timezone.reset(timezone_token)
+            reset_user_insight_context(db_token, user_id_token)
     finally:
         db.close()
